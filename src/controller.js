@@ -34,9 +34,10 @@
     var state = {
       bytes: null, url: "", size: 0, capturedAt: 0,      // the WCC bundle
       resources: [], payloads: {}, seen: {}, keptBytes: 0, // diagnostics: every recorded response
-      tokens: {},                                         // tokens announced by our MAIN-world scripts
+      tokens: Object.create(null),                        // tokens announced by our MAIN-world scripts (no prototype keys)
+      hellos: 0, locked: false,                           // the token list closes after our own announcements
       glReqId: 0, glPending: null,                        // WebGL snapshot round trip
-      maxStage: null, currentStep: null, stepTotal: null, stepSource: null,
+      maxStage: null, currentStep: null, stepTotal: null, stepSource: null, firstStage: 0,
       busy: null, progress: null, cancelled: false        // command in flight + every-aligner progress
     };
 
@@ -49,7 +50,7 @@
         onChange: function (info) {
           if (state.stepSource === "viewer") return;
           state.currentStep = info.stage; state.stepTotal = info.total; state.stepSource = info.source;
-          emit("onStep", { aligner: info.stage + 1, total: info.total });
+          emit("onStep", { aligner: alignerOf(info.stage), total: info.total });
         }
       });
       probe.start();
@@ -57,10 +58,26 @@
     // which stage to export: the Advanced override (typed as the viewer's aligner number) wins
     function resolveStage(override) {
       if (override != null && override !== "") {
-        var s = Math.max(0, (override | 0) - 1);
+        var s = Math.max(0, state.firstStage + (override | 0) - 1);
         return state.maxStage != null ? Math.min(state.maxStage, s) : s;
       }
       return state.currentStep != null ? state.currentStep : 0;
+    }
+
+    // a stage number from the viewer: a small non-negative integer
+    function isStage(n) { return typeof n === "number" && isFinite(n) && n >= 0 && n <= 10000 && Math.floor(n) === n; }
+    // the viewer's "Aligner Number" for an engine stage (verified live: aligner 1 = firstStage)
+    function alignerOf(stage) { return stage - state.firstStage + 1; }
+    // ripped meshes from the page: keep only well-formed typed arrays
+    function cleanMeshes(list) {
+      if (!Array.isArray(list)) return [];
+      var budget = 3 * 8000000;                       // floats across all meshes (the real frame is ~0.2M)
+      return list.filter(function (m) {
+        var ok = m && m.positions instanceof Float32Array && m.indices instanceof Uint32Array &&
+          m.positions.length % 3 === 0 && m.positions.length <= 3 * 4000000 && m.indices.length <= 3 * 10000000 &&
+          (budget -= m.positions.length) >= 0;
+        return ok;
+      });
     }
 
     // ---- diagnostics helpers ----
@@ -99,33 +116,52 @@
       if (ev.origin !== location.origin && ev.origin !== "null") return;
       var d = ev.data;
       if (!d || d.source !== TAG) return;
-      if (d.kind === "hello") { if (typeof d.token === "string") state.tokens[d.token] = true; return; }
-      if (!d.token || !state.tokens[d.token]) return;            // reject forged / pre-token messages
+      // Our three MAIN-world scripts (capture, webgl_capture, viewer_bridge) each post one hello at
+      // document_start, before page code runs, so the first three are ours. After that, or once real
+      // traffic starts, no new token is accepted. This stops a page script from registering its own.
+      // It is not secrecy (the page can read our tokens off this window), so every payload below is
+      // still type-checked and bounded; the hard boundary is ev.source === window.
+      if (d.kind === "hello") {
+        if (!state.locked && state.hellos < 3 && typeof d.token === "string" && d.token.length >= 8) { state.tokens[d.token] = true; state.hellos++; }
+        if (state.hellos >= 3) state.locked = true;
+        return;
+      }
+      if (typeof d.token !== "string" || state.tokens[d.token] !== true) return;
+      state.locked = true;
 
       if (d.kind === "gl-snapshot") {
         var p = state.glPending;
         if (!p || d.reqId !== p.id) return;                      // a late reply to an older request
         state.glPending = null;
-        p.resolve({ meshes: Array.isArray(d.meshes) ? d.meshes : [], summary: d.summary || { error: d.error || null } });
+        p.resolve({ meshes: cleanMeshes(d.meshes), summary: (d.summary && typeof d.summary === "object") ? d.summary : { error: d.error || null } });
         return;
       }
       if (d.kind === "viewer-stage" && d.info) {
-        state.currentStep = d.info.currentStage; state.stepTotal = d.info.lastStage; state.stepSource = "viewer";
-        if (state.busy !== "allStages") emit("onStep", { aligner: d.info.currentStage - d.info.firstStage + 1, total: d.info.lastStage });
+        var vi = d.info;
+        if (!isStage(vi.currentStage) || !isStage(vi.firstStage) || !isStage(vi.lastStage) || vi.firstStage > vi.lastStage) return;
+        state.currentStep = vi.currentStage; state.firstStage = vi.firstStage; state.stepTotal = vi.lastStage - vi.firstStage;
+        state.stepSource = "viewer";
+        if (state.busy !== "allStages") emit("onStep", { aligner: alignerOf(vi.currentStage), total: state.stepTotal });
         return;
       }
-      if (d.kind === "wcc" && d.bytes) {
+      if (d.kind === "wcc" && d.bytes instanceof ArrayBuffer) {
         if (d.bytes.byteLength > MAX_BYTES) return;
         var wb = new Uint8Array(d.bytes);
         if (!MAGIC.zip(wb)) return;                              // must really be a ZIP
-        state.bytes = wb; state.url = d.url || ""; state.size = wb.length; state.capturedAt = Date.now();
-        try { state.maxStage = engine.stageRange(wb).max; } catch (e) {}
+        // only a real treatment-plan bundle replaces the scan: another zip the portal fetches later
+        // (or junk) must not clobber a good capture
+        var range;
+        try { range = engine.stageRange(wb); } catch (e) { return; }
+        state.bytes = wb; state.url = typeof d.url === "string" ? d.url : ""; state.size = wb.length; state.capturedAt = Date.now();
+        state.maxStage = range.max;
         ensureProbe();
         emit("onCapture", state);
         return;
       }
       if (d.kind === "resource") {
-        var key = (d.url || "") + "|" + d.size;
+        if (typeof d.url !== "string" || typeof d.size !== "number") return;
+        if (d.bytes != null && !(d.bytes instanceof ArrayBuffer)) return;
+        var key = d.url + "|" + d.size;
         if (state.seen[key]) return;
         state.seen[key] = true;
         var rec = { url: d.url || "", ct: d.ct || "", size: d.size || 0, fmt: d.fmt || null, file: null };
@@ -173,13 +209,32 @@
       // the aligner on screen: exact teeth + the real gums ripped from WebGL
       fullMouth: function (args) {
         var stage = resolveStage(args && args.override);
-        return snapshot().then(function (snap) {
+        var onScreen = state.stepSource === "viewer" && state.currentStep === stage;
+        var gather;
+        if (!onScreen && state.stepSource === "viewer") {
+          // another aligner than the one on screen: show it, rip its gums, put the viewer back
+          gather = root.TeethRipStage({ tag: TAG, origin: ORIGIN, tokens: state.tokens, clean: cleanMeshes }, stage)
+            .then(function (r) {
+              // the viewer is back (or not): take its reported stage now, not at the next 500 ms push
+              if (r.viewer && isStage(r.viewer.currentStage)) state.currentStep = r.viewer.currentStage;
+              return { snap: { meshes: r.meshes, summary: r.summary, timedOut: r.timedOut }, restored: r.restored };
+            });
+        } else {
+          // the aligner on screen: its latest frame first; all drawn variants only as a fallback
+          gather = snapshot(true).then(function (snap) {
+            var probe = engine.exportFromBundle(state.bytes, { stage: stage, glb: false, glMeshes: snap.meshes || [] });
+            if (((probe.gumInfo && probe.gumInfo.gums) || []).length >= 2) return { snap: snap, restored: true };
+            return snapshot(false).then(function (all) { return { snap: all.meshes && all.meshes.length ? all : snap, restored: true }; });
+          });
+        }
+        return gather.then(function (g) {
+          var snap = g.snap;
           var res = engine.exportFromBundle(state.bytes, { stage: stage, glb: true, glMeshes: snap.meshes || [] });
           var gums = (res.gumInfo && res.gumInfo.gums) || [];
           var arches = gums.map(function (g) { return g.arch; });
           var lines = [
             "Teeth Exporter (unofficial)",
-            "Aligner Number " + (stage + 1) + "  |  units: millimeters, true scale", "",
+            "Aligner Number " + alignerOf(stage) + "  |  units: millimeters, true scale", "",
             gums.length
               ? "Real gums included: " + arches.join(" + ") + "   (fit: " + gums.map(function (g) { return g.arch + " " + g.cost + "mm"; }).join(", ") + ")"
               : (snap.timedOut
@@ -207,19 +262,21 @@
           // same layout as each folder of the every-aligner export: everyday files on top, rest in Advanced/
           download(engine.zipOutputs(engine.layoutStage(res.outputs, ""), { "Advanced/manifest.json": text(JSON.stringify(res.manifest, null, 2)), "Advanced/README.txt": text(lines.join("\n")) }),
             "teeth_exporter_full_mouth_" + ts() + ".zip");
-          return { ok: true, aligner: stage + 1, teeth: res.stats.teeth, arches: arches, timedOut: !!snap.timedOut };
+          return { ok: true, aligner: alignerOf(stage), teeth: res.stats.teeth, arches: arches, timedOut: !!snap.timedOut, restored: g.restored,
+            gumsFromScreen: !onScreen && state.stepSource !== "viewer" };
         });
       },
       // every aligner with its real gums, one folder each (all_stages.js steps the viewer)
       allStages: function () {
         state.progress = { aligner: null, total: null };
         return root.TeethAllStages({
-          tag: TAG, origin: ORIGIN, tokens: state.tokens, engine: engine, fflate: root.fflate, bytes: state.bytes,
+          tag: TAG, origin: ORIGIN, tokens: state.tokens, engine: engine, fflate: root.fflate, bytes: state.bytes, clean: cleanMeshes,
           onProgress: function (p) { state.progress = { aligner: p.aligner, total: p.total }; emit("onProgress", state.progress); },
           isCancelled: function () { return state.cancelled; }
         }).then(function (res) {
           download(res.chunks, "teeth_exporter_all_aligners_" + ts() + ".zip");
-          return { ok: true, count: res.stageCount, missing: res.missing, bytes: res.bytes };
+          return { ok: true, count: res.stageCount, missing: res.missing, bytes: res.bytes, restored: res.restored,
+            budgetHit: res.budgetHit, backTo: res.original - res.firstStage + 1 };
         });
       },
       // the untouched scan file the viewer loaded (backup, offline tools, bug reports)
@@ -229,8 +286,10 @@
       },
       // every mesh/archive the viewer downloaded + a redacted index of all responses
       diag: function () {
-        var entries = {};
-        for (var name in state.payloads) entries[name] = state.payloads[name];
+        // zips are left out: the scan bundle itself is one, and it carries treatment-plan identifiers
+        // (it has its own clearly labeled "Download raw scan" button)
+        var entries = {}, kept = 0;
+        for (var name in state.payloads) if (!/\.zip$/i.test(name)) { entries[name] = state.payloads[name]; kept++; }
         entries["index.json"] = text(JSON.stringify({
           capturedAt: new Date().toISOString(),
           wccBundle: state.bytes ? { size: state.size, url: safeUrl(state.url) } : null,
@@ -238,7 +297,7 @@
           allResponses: state.resources.map(function (r) { return { url: safeUrl(r.url), ct: r.ct, size: r.size, fmt: r.fmt, file: r.file }; })
         }, null, 2));
         download(engine.zipOutputs({}, entries), "teeth_exporter_diagnostics_" + ts() + ".zip");
-        return Promise.resolve({ ok: true, files: Object.keys(state.payloads).length, responses: state.resources.length });
+        return Promise.resolve({ ok: true, files: kept, responses: state.resources.length });
       },
       // what's on screen right now as a clean GLB: the latest frame's 3D meshes in the viewer's own
       // frame, unregistered (troubleshooting). Teeth white, gums pink.
@@ -279,7 +338,7 @@
     function status() {
       return {
         captured: !!state.bytes, size: state.size,
-        aligner: state.currentStep != null ? state.currentStep + 1 : null, total: state.stepTotal,
+        aligner: state.currentStep != null ? alignerOf(state.currentStep) : null, total: state.stepTotal,
         busy: state.busy, progress: state.busy === "allStages" ? state.progress : null,
         files: Object.keys(state.payloads).length
       };

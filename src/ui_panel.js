@@ -18,7 +18,7 @@
 
   // The look. Kept as a theme table so a future variant only adds colors, never layout.
   var THEMES = {
-    mint: {                      // the chosen look (Jason, 2026-10-19)
+    mint: {
       paper: "#FFFFFF", ink: "#16302B", ink2: "#4F6B65", ink3: "#93A8A3", line: "#E4EFEC", soft: "#EEF8F5",
       primary: "#2BB58A", primaryHover: "#239C76", primaryInk: "#FFFFFF", chip: "#DDF5EC", chipInk: "#17785A",
       ok: "#2BB58A", err: "#D9534F", errBg: "#FDECEA", radius: "16px", btnRadius: "12px", head: "#F3FBF8",
@@ -203,7 +203,7 @@
     field.appendChild(el("span", "te-label", "Aligner number"));
     var input = el("input", "te-input"); input.type = "number"; input.min = "1"; input.placeholder = "current";
     field.appendChild(input);
-    var hintField = el("p", "te-hint", "Blank exports the aligner on screen. A number exports that aligner instead, numbered like the viewer's slider.");
+    var hintField = el("p", "te-hint", "Blank exports the aligner on screen. A number exports that aligner instead, numbered like the viewer's slider. The viewer briefly moves there to capture its gums.");
     var btnRaw = el("button", "te-btn te-btn--quiet", "Download raw scan");
     var hintRaw = el("p", "te-hint", "The original scan file, untouched. A backup of your data, and the file to send with a bug report.");
     var rule = el("div", "te-rule");
@@ -212,7 +212,7 @@
     var btnDiag = el("button", "te-btn te-btn--quiet", "Download captured files");
     var btnGl = el("button", "te-btn te-btn--quiet", "Download rendered 3D");
     stack.appendChild(btnDiag); stack.appendChild(btnGl);
-    var hintDiag = el("p", "te-hint", "For bug reports. Case IDs and private links are removed from the file list.");
+    var hintDiag = el("p", "te-hint", "For bug reports. Your scan is not included, and case IDs and private links are removed from the file list.");
     [field, hintField, btnRaw, hintRaw, rule, sub, stack, hintDiag].forEach(function (n) { advBody.appendChild(n); });
     adv.appendChild(advBody);
 
@@ -256,8 +256,11 @@
     function overrideValue() { var v = (input.value || "").trim(); return v === "" ? null : (parseInt(v, 10) || 1); }
 
     function describe(name, r) {
+      var back = r.restored === false ? " The viewer couldn't be moved back: set the slider to your aligner again." : "";
       if (name === "fullMouth") {
         var a = r.arches || [];
+        if (back) return ["Saved aligner " + r.aligner + "." + back, true];
+        if (r.gumsFromScreen) return ["Saved aligner " + r.aligner + ". This viewer can't be moved by the tool, so the gums are from the aligner on screen.", true];
         if (a.length >= 2) return ["Saved aligner " + r.aligner + ": " + r.teeth + " teeth and both gums.", false];
         if (a.length === 1) return ["Saved aligner " + r.aligner + " with only the " + (a[0] === "U" ? "upper" : "lower") + " gum. Orbit to show the other gum, then export again.", true];
         return [r.timedOut
@@ -266,10 +269,13 @@
       }
       if (name === "allStages") {
         var miss = r.missing && r.missing.length;
-        return ["Saved " + r.count + " aligners with real gums (" + fmtSize(r.bytes) + ")." + (miss ? " Gum missing on aligner " + r.missing.join(", ") + "." : ""), !!miss];
+        var t = "Saved " + r.count + " aligners with real gums (" + fmtSize(r.bytes) + ").";
+        if (miss) t += " Gum missing on aligner " + r.missing.join(", ") + "." + (r.budgetHit ? " The capture ran out of memory: reload the viewer page and run it again." : "");
+        if (r.restored === false) t += " The viewer couldn't be moved back to aligner " + r.backTo + ": set the slider yourself.";
+        return [t, !!miss || r.restored === false];
       }
       if (name === "raw") return ["Saved the raw scan (" + fmtSize(r.bytes) + ").", false];
-      if (name === "diag") return ["Saved " + r.files + " captured files and an index of " + r.responses + " responses.", false];
+      if (name === "diag") return ["Saved " + r.files + " captured files and an index of " + r.responses + " responses. Your scan itself is not included.", false];
       if (name === "glCapture") return ["Saved " + r.count + " rendered meshes." + (r.skipped ? " Left out " + r.skipped + " with broken data." : ""), false];
       return ["Done.", false];
     }

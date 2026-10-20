@@ -1,5 +1,5 @@
 /*
- * background.js — MV3 service worker. Badges the toolbar icon when a scan is captured in a tab,
+ * background.js: MV3 service worker. Badges the toolbar icon when a scan is captured in a tab,
  * and remembers WHICH FRAME captured it. The viewer usually lives in an iframe
  * (con-share-tx-plan-*.aligntech.com inside my.invisalign.com); a tab-wide message is answered
  * first by the top frame, which has no scan, so the popup must address the capturing frame.
@@ -27,13 +27,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     chrome.storage.session.set(rec);
     chrome.action.setBadgeText({ tabId: tabId, text: "OK" });
     chrome.action.setBadgeBackgroundColor({ tabId: tabId, color: "#2BB58A" });
-    chrome.action.setTitle({ tabId: tabId, title: "Teeth Exporter — scan ready (" + fmtSize(msg.size || 0) + ")" });
+    chrome.action.setTitle({ tabId: tabId, title: "Teeth Exporter: scan ready (" + fmtSize(msg.size || 0) + ")" });
   }
   // live aligner-step badge: reflect the step the user is currently viewing
   if (msg.type === "stage-step" && tabId != null && msg.step != null) {
     chrome.action.setBadgeText({ tabId: tabId, text: "A" + msg.step });           // the viewer's aligner number
     chrome.action.setBadgeBackgroundColor({ tabId: tabId, color: "#2BB58A" });
-    chrome.action.setTitle({ tabId: tabId, title: "Teeth Exporter — aligner " + msg.step + (msg.total ? " / " + msg.total : "") + (msg.progress ? " (capturing)" : " (current view)") });
+    chrome.action.setTitle({ tabId: tabId, title: "Teeth Exporter: aligner " + msg.step + (msg.total ? " / " + msg.total : "") + (msg.progress ? " (capturing)" : " (current view)") });
   }
 });
 

@@ -58,11 +58,11 @@ check('text "Aligner Number 21 / 21" -> stage 20', r && r.stage === 20);
 r = run({ max: () => 21, ranges: [el({ min: "0", max: "100", value: "40" })] });
 check("ignores unrelated max=100 slider (no false positive)", r === null);
 
-// 5) F12: 1-indexed slider whose max equals the stage count (1..21) reads the stage directly
+// 5) a 1-based aligner slider (1..21): aligner N is stage N-1, like the live viewer
 r = run({ max: () => 21, ranges: [el({ min: "1", max: "21", value: "21" })] });
-check("1..21 slider at 21 -> stage 21 (reachable, not one low)", r && r.stage === 21);
+check("1..21 slider at 21 -> stage 20 (aligner 21 is stage 20)", r && r.stage === 20);
 r = run({ max: () => 21, ranges: [el({ min: "1", max: "21", value: "5" })] });
-check("1..21 slider at 5 -> stage 5", r && r.stage === 5);
+check("1..21 slider at 5 -> stage 4 (aligner N = stage N-1)", r && r.stage === 4);
 
 // 6) F12: ARIA 1..22 with no aria-valuemin is still treated as 1-indexed
 r = run({ max: () => 21, aria: [el({ getAttribute: (k) => ({ "aria-valuemax": "22", "aria-valuenow": "22" }[k] || null) })] });

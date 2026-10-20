@@ -1283,7 +1283,11 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
   }
 
   // sanity bounds on untrusted input (a real ClinCheck tooth is < 2k verts; the bundle ~1.3 MB)
-  var LIMITS = { vc: 5000000, tc: 10000000, zipIn: 96 * 1024 * 1024, entries: 5000, outBytes: 512 * 1024 * 1024 };
+  var LIMITS = { vc: 5000000, tc: 10000000, zipIn: 96 * 1024 * 1024, entries: 5000, outBytes: 512 * 1024 * 1024,
+    maps: 8,                                   // UV / attribute maps per CTM (a tooth has none)
+    ctmAlloc: 256 * 1024 * 1024,               // bytes the CTM reader may allocate for one mesh
+    entryOut: 64 * 1024 * 1024,                // one unzipped file
+    unzipOut: 256 * 1024 * 1024 };             // all unzipped files together (the real bundle is ~3 MB)
   function i32le(b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)); }
 
   // ----------------------------------------------------------------- CTM decode
@@ -1291,13 +1295,23 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
   function decodeCTM(bytes) {
     if (!bytes || bytes.length < 36) throw new Error("CTM too small");
     // peek the header counts BEFORE CTM.File allocates buffers from them (reject zip-bomb-style meshes)
-    var vc = i32le(bytes, 12), tc = i32le(bytes, 16);
+    var vc = i32le(bytes, 12), tc = i32le(bytes, 16), uv = i32le(bytes, 20), at = i32le(bytes, 24);
     if (vc < 0 || tc < 0 || vc > LIMITS.vc || tc > LIMITS.tc)
       throw new Error("CTM rejected: implausible counts " + vc + "v/" + tc + "f");
+    if (uv < 0 || at < 0 || uv > LIMITS.maps || at > LIMITS.maps)
+      throw new Error("CTM rejected: implausible map counts " + uv + " uv / " + at + " attr");
+    // the reader allocates one buffer from these counts (indices + verts + normals + maps)
+    var alloc = (tc * 3 + vc * 3 * 2 + vc * 2 * uv + vc * 4 * at) * 4;
+    if (alloc > LIMITS.ctmAlloc) throw new Error("CTM rejected: too large");
     var stream = new CTM.Stream(bytes);
     stream.offset = 0;
     var file = new CTM.File(stream);
-    return { vertices: file.body.vertices, faces: file.body.indices };
+    var V = file.body.vertices, F = file.body.indices;
+    // a truncated or forged file can "decode" into garbage: no NaN vertices, no face past the end
+    for (var k = 0; k < V.length; k++) if (!isFinite(V[k])) throw new Error("CTM rejected: invalid vertex data");
+    var nv = V.length / 3;
+    for (var q = 0; q < F.length; q++) if (F[q] >= nv) throw new Error("CTM rejected: invalid face data");
+    return { vertices: V, faces: F };
   }
 
   // ----------------------------------------------------------------- seating (jaws.json)
@@ -1361,6 +1375,8 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
   function stageRange(zipBytes) {
     var files = unzip(zipBytes);
     var teethMeta = readJSON(files, "teeth.json");
+    if (!Array.isArray(teethMeta) || !teethMeta.length) throw new Error("no teeth in WCC bundle");
+    readJSON(files, "jaws.json");                          // a real plan always has its jaw transforms
     var maxAll = 0, maxU = 0, maxL = 0;
     for (var i = 0; i < teethMeta.length; i++) {
       var t = teethMeta[i], arch = archOf(t), mx = 0;
@@ -1381,9 +1397,22 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
   // ----------------------------------------------------------------- bundle helpers
   function unzip(zipBytes) {
     if (!zipBytes || zipBytes.length > LIMITS.zipIn) throw new Error("zip too large / missing");
-    var raw = fflate.unzipSync(zipBytes);
-    var keys = Object.keys(raw);
-    if (keys.length > LIMITS.entries) throw new Error("zip has too many entries");
+    // decide per entry BEFORE inflating: only the mesh + JSON files the engine reads, each and all
+    // together under a size cap (a small zip of zeros could otherwise inflate to gigabytes)
+    var seen = 0, total = 0, tooBig = false;
+    var raw = fflate.unzipSync(zipBytes, { filter: function (f) {
+      if (++seen > LIMITS.entries) { tooBig = true; return false; }
+      if (!/\.(ctm|json)$/i.test(f.name)) return false;
+      if (f.originalSize > LIMITS.entryOut || (total += f.originalSize) > LIMITS.unzipOut) { tooBig = true; return false; }
+      return true;
+    } });
+    if (tooBig) throw new Error("zip rejected: too many or too large entries");
+    var keys = Object.keys(raw), actual = 0;
+    // the advertised sizes can lie (a stored entry may claim 1 byte), so check what actually came out
+    for (var j = 0; j < keys.length; j++) {
+      actual += raw[keys[j]].length;
+      if (raw[keys[j]].length > LIMITS.entryOut || actual > LIMITS.unzipOut) throw new Error("zip rejected: too large");
+    }
     var files = {};
     for (var i = 0; i < keys.length; i++) files[keys[i].split("/").pop()] = raw[keys[i]]; // flatten to basenames
     return files;
@@ -1960,15 +1989,11 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
       if (c[0].score < 85) return null;
       var best = c[0];
       // map to 0-based engine stage (stages 0..maxStage):
-      //   total == maxStage+1  -> 1-indexed control (1..maxStage+1), even when min is missing
-      //   total == maxStage, min 1 -> control counts stages 1..maxStage directly
-      //   otherwise            -> offset by the control's min
+      // Controls count ALIGNERS, which start at 1: the live ClinCheck viewer shows "Aligner Number 1 / 21"
+      // at stage 0 and "21 / 21" at stage 20, so aligner N = stage N - 1. A 1-based control (min 1,
+      // or text, or a total of maxStage+1 with no min) maps N -> N - 1; a 0-based one maps directly.
       var offset = best.min;
-      // text labels are 1-based aligner numbers: the live ClinCheck viewer shows "Aligner Number 1 / 21"
-      // at stage 0 and "21 / 21" at stage 20 (verified 2026-10-19), so label N = stage N - 1
-      if (best.source === "text") offset = 1;
-      else if (best.total === maxStage + 1) offset = 1;
-      else if (best.total === maxStage && best.min === 1) offset = 0;
+      if (best.source === "text" || best.total === maxStage + 1) offset = 1;
       var stage = Math.max(0, Math.min(maxStage, Math.round(best.current - offset)));
       return { stage: stage, current: best.current, total: best.total, source: best.source };
     }
@@ -2040,9 +2065,11 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
 
   var MAX_BYTES = 96 * 1024 * 1024;   // never buffer/forward responses larger than this
 
-  // Per-load random token. capture.js runs at document_start (before the page's app code),
-  // so it announces this token to content.js first; content.js then rejects any message that
-  // doesn't carry it — a page script injected later can't have observed an earlier announce.
+  // Per-load random token, announced in a "hello" at document_start. The controller accepts only
+  // the first few hellos (ours, queued before page code runs) and then locks its token list, so a
+  // page script can't register its own token. It is NOT a secret from the page: replies on this
+  // window carry it and any page listener can read them. The real boundary is ev.source === window
+  // (no other frame can post into this one); everything received is still validated and bounded.
   var TOKEN = (function () {
     try {
       var a = new Uint8Array(16); (self.crypto || window.crypto).getRandomValues(a);
@@ -2072,13 +2099,34 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
 
   // worth cloning the body? skip obvious html/js/css/json/images to stay light.
   function worthInspecting(url, ct, len) {
-    if (/text\/html|javascript|text\/css|^image\/|font|^text\/plain|application\/wasm/i.test(ct)) return false;
-    if (/\.(js|css|html?|png|jpe?g|gif|svg|woff2?|ttf|map|wasm)(\?|$)/i.test(url)) return false;
+    if (/text\/html|javascript|text\/css|^image\/|^video\/|^audio\/|json|font|^text\/plain|application\/wasm/i.test(ct)) return false;
+    if (/\.(js|css|html?|json|png|jpe?g|gif|svg|webp|mp4|webm|m3u8|ts|mp3|woff2?|ttf|map|wasm)(\?|$)/i.test(url)) return false;
     if (len && len > MAX_BYTES) return false;                   // never clone giant bodies
     if (/octet-stream|zip|model\/|application\/x|ctm|gltf|glb|draco|mesh|binary/i.test(ct)) return true;
     if (/wcc|ctm|gltf|glb|drc|\.ply|\.stl|\.obj|mesh|model|scan|gingiv|gum/i.test(url)) return true;
-    if (len && len > 60000) return true;                        // large unknown binary -> peek
+    if (len > 60000) return true;                               // large unknown binary with a known size -> peek
     return false;
+  }
+
+  // read a cloned response body with a running byte count; give up (and cancel) past MAX_BYTES,
+  // so a body with a missing or false Content-Length can't be buffered without limit
+  function readCapped(res) {
+    if (!res.body || !res.body.getReader) return res.arrayBuffer().then(function (ab) { return ab.byteLength > MAX_BYTES ? null : ab; });
+    var reader = res.body.getReader(), parts = [], total = 0;
+    function pump() {
+      return reader.read().then(function (r) {
+        if (r.done) {
+          var out = new Uint8Array(total), o = 0;
+          for (var i = 0; i < parts.length; i++) { out.set(parts[i], o); o += parts[i].byteLength; }
+          return out.buffer;
+        }
+        total += r.value.byteLength;
+        if (total > MAX_BYTES) { try { reader.cancel(); } catch (e) {} return null; }
+        parts.push(r.value);
+        return pump();
+      });
+    }
+    return pump();
   }
 
   // Post to our isolated content script, scoped to THIS page's origin so a cross-origin
@@ -2124,7 +2172,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
           var ct = (res.headers && res.headers.get && res.headers.get("content-type")) || "";
           var len = (res.headers && res.headers.get && +res.headers.get("content-length")) || 0;
           if (worthInspecting(url, ct, len)) {
-            res.clone().arrayBuffer().then(function (ab) { inspect(url, ct, ab); }).catch(function () {});
+            readCapped(res.clone()).then(function (ab) { if (ab) inspect(url, ct, ab); }).catch(function () {});
           }
         } catch (e) {}
         return res;
@@ -2163,7 +2211,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
         if (!worth && xhr.responseType !== "" && xhr.responseType !== "text") return;
         if (xhr.responseType === "" || xhr.responseType === "text") {
           var s = xhr.responseText || "";
-          if (s && (s.charCodeAt(0) === 0x50 && s.charCodeAt(1) === 0x4b)) {
+          if (s && s.length <= MAX_BYTES && (s.charCodeAt(0) === 0x50 && s.charCodeAt(1) === 0x4b)) {
             var u = new Uint8Array(s.length);
             for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i) & 0xff;
             inspect(url, ct, u.buffer);
@@ -2211,6 +2259,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
   var MAX_DRAWS = 4000;        // distinct draw signatures to remember
   var MAX_BUF = 64 * 1024 * 1024;
   var MAX_SNAP_TOTAL = 192 * 1024 * 1024;  // total bytes of draw-time snapshots kept per context
+  var MAX_BUF_TOTAL = 256 * 1024 * 1024;   // total bytes of live upload copies kept per context
 
   // ---- GL constant byte sizes ----
   function compBytes(type) {
@@ -2249,7 +2298,9 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
       colorByProgram: new Map(),          // program -> last vec4-ish uniform seen (color guess)
       snapCache: new Map(), snapBytes: 0, // fingerprint -> shared byte copy; total kept bytes
       fps: new Map(),                     // WebGLBuffer -> content hash of its current bytes
-      overBudget: false                   // a draw was dropped because MAX_SNAP_TOTAL was hit
+      bufBytes: 0,                        // running total of S.buffers
+      overBudget: false,                  // a draw was dropped because MAX_SNAP_TOTAL was hit
+      capHit: false                       // a new draw was dropped because MAX_DRAWS was hit
     };
     contexts.push(S);
 
@@ -2266,22 +2317,49 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
         if (S.curVAO) setVAO(S.curVAO).element = buffer; else S.globalElement = buffer;
       }
     });
-    wrap("bufferData", function (target, data) {
-      var buf = (target === gl.ELEMENT_ARRAY_BUFFER) ? S.boundElement : S.boundArray;
-      if (!buf || typeof data === "number") return;            // sized-only alloc, no data
-      // always COPY: a bare ArrayBuffer is often a scratch buffer the viewer reuses for the next mesh
-      var bytes = data.buffer ? new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)) : new Uint8Array(data.slice(0));
+    // the buffer an upload lands in: element uploads follow the bound VAO's element binding
+    function targetBuf(target) { return (target === gl.ELEMENT_ARRAY_BUFFER) ? elementBuf() : S.boundArray; }
+    // copy the uploaded bytes, honoring WebGL2's (srcOffset, length) in elements of a typed view.
+    // Always a COPY: a bare ArrayBuffer is often a scratch buffer the viewer reuses for the next mesh.
+    function setBuf(buf, bytes) {                    // keep one upload copy, within the aggregate cap
+      var old = S.buffers.get(buf);
+      if (old) S.bufBytes -= old.byteLength;
+      S.buffers.delete(buf);
+      if (!bytes || bytes.byteLength > MAX_BUF || S.bufBytes + bytes.byteLength > MAX_BUF_TOTAL) return;
+      S.buffers.set(buf, bytes); S.bufBytes += bytes.byteLength;
+    }
+    function viewLen(data, srcOffset, length) {      // bytes an upload would copy, without copying
+      if (data.buffer) { var esz = data.BYTES_PER_ELEMENT || 1; return length ? length * esz : data.byteLength - (srcOffset ? srcOffset * esz : 0); }
+      return data.byteLength;
+    }
+    function srcBytes(data, srcOffset, length) {
+      if (data.buffer) {
+        var esz = data.BYTES_PER_ELEMENT || 1;
+        var start = data.byteOffset + (srcOffset ? srcOffset * esz : 0);
+        var end = length ? start + length * esz : data.byteOffset + data.byteLength;
+        return new Uint8Array(data.buffer.slice(start, Math.min(end, data.byteOffset + data.byteLength)));
+      }
+      return new Uint8Array(data.slice(0));
+    }
+    wrap("bufferData", function (target, data, usage, srcOffset, length) {
+      var buf = targetBuf(target);
+      if (!buf) return;
       S.fps.delete(buf);
-      if (bytes.byteLength <= MAX_BUF) S.buffers.set(buf, bytes); else S.buffers.delete(buf);
+      if (typeof data === "number" || !data || viewLen(data, srcOffset, length) > MAX_BUF) { setBuf(buf, null); return; }
+      setBuf(buf, srcBytes(data, srcOffset, length));
     });
-    wrap("bufferSubData", function (target, offset, data) {
-      var buf = (target === gl.ELEMENT_ARRAY_BUFFER) ? S.boundElement : S.boundArray;
+    wrap("bufferSubData", function (target, offset, data, srcOffset, length) {
+      var buf = targetBuf(target);
       if (!buf || !data || typeof data === "number") return;
-      var bytes = data.buffer ? new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)) : new Uint8Array(data);
-      var cur = S.buffers.get(buf);
-      if (!cur || cur.byteLength < offset + bytes.byteLength) { var nb = new Uint8Array(Math.max(offset + bytes.byteLength, cur ? cur.byteLength : 0)); if (cur) nb.set(cur); cur = nb; }
-      cur.set(bytes, offset); S.buffers.set(buf, cur); S.fps.delete(buf);
+      S.fps.delete(buf);
+      var need = offset + viewLen(data, srcOffset, length);
+      if (need > MAX_BUF) { setBuf(buf, null); return; }                 // never grow past the cap
+      var bytes = srcBytes(data, srcOffset, length), cur = S.buffers.get(buf);
+      if (!cur || cur.byteLength < need) { var nb = new Uint8Array(Math.max(need, cur ? cur.byteLength : 0)); if (cur) nb.set(cur); cur = nb; }
+      cur.set(bytes, offset); setBuf(buf, cur);
     });
+    // a deleted GL buffer's copy is dead weight: drop it so long sessions don't grow without bound
+    wrap("deleteBuffer", function (buf) { if (buf) { setBuf(buf, null); S.fps.delete(buf); } });
     wrap("vertexAttribPointer", function (loc, size, type, normalized, stride, offset) {
       attribTable()[loc] = { buffer: S.boundArray, size: size, type: type, normalized: !!normalized, stride: stride, offset: offset, enabled: true };
     });
@@ -2325,7 +2403,6 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     }
 
     function record(mode, count, indexType, indexOffset, drawType) {
-      if (S.draws.length >= MAX_DRAWS) return;
       var attribs = attribTable();
       var locs = Object.keys(attribs).filter(function (l) { return attribs[l].enabled && attribs[l].buffer; });
       if (!locs.length) return;
@@ -2339,9 +2416,12 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
       // layout signature + content fingerprint => dedupe identical geometry across frames,
       // while keeping distinct geometry that happens to share a layout.
       var vfp = fpFor(pos.buffer, posBytes);
-      var sig = drawType + "|" + (S.program ? progId(S.program) : "-") + "|" + mode + "|" + count + "|" + locs.map(function (l) { var a = attribs[l]; return l + ":" + a.size + ":" + a.type + ":" + a.stride + ":" + a.offset; }).join(",") + "|" + indexType + ":" + indexOffset + "|fp:" + vfp;
+      var ifp = elemBytes ? fpFor(elemBuf, elemBytes) : "-";   // same vertices, new triangles = a new draw
+      var sig = drawType + "|" + (S.program ? progId(S.program) : "-") + "|" + mode + "|" + count + "|" + locs.map(function (l) { var a = attribs[l]; return l + ":" + a.size + ":" + a.type + ":" + a.stride + ":" + a.offset; }).join(",") + "|" + indexType + ":" + indexOffset + "|fp:" + vfp + "|ifp:" + ifp;
       var now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
       if (S.seen[sig]) { var known = S.drawBySig[sig]; if (known) { known.epoch = EPOCH; known.t = now; } return; }
+      // the cap applies to NEW draws only, so known draws above keep getting fresh epochs/timestamps
+      if (S.draws.length >= MAX_DRAWS) { S.capHit = true; return; }
       // snapshot the referenced bytes AT DRAW TIME so a later overwrite can't corrupt them.
       // Copies are shared via a content-fingerprint cache (many draws reference the same upload,
       // e.g. one interleaved buffer per model) and bounded by MAX_SNAP_TOTAL so stage-scrubbing /
@@ -2353,14 +2433,16 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
         c = new Uint8Array(bytes); S.snapBytes += c.byteLength; S.snapCache.set(key, c);
         return c;
       }
-      var vcopy = snap(posBytes, "v:" + posBytes.byteLength + ":" + vfp);
-      var icopy = elemBytes ? snap(elemBytes, "i:" + fpFor(elemBuf, elemBytes)) : null;
+      var vkey = "v:" + posBytes.byteLength + ":" + vfp, ikey = elemBytes ? "i:" + ifp : null;
+      var vcopy = snap(posBytes, vkey);
+      var icopy = elemBytes ? snap(elemBytes, ikey) : null;
       // over budget: keep what we have, and say so. The signature is NOT burned, so the draw is
       // retried (and can still be kept) if budget frees up; nothing is silently marked "seen".
       if (!vcopy || (elemBytes && !icopy)) { S.overBudget = true; return; }
       S.seen[sig] = true;
       var rec = {
         epoch: EPOCH, t: now,                                  // t = last time this draw was seen (latest-frame filter)
+        created: EPOCH, sig: sig, vkey: vkey, ikey: ikey,      // for gl-stats and pruning
         mode: mode, count: count, drawType: drawType, indexType: indexType, indexOffset: indexOffset,
         program: S.program ? progId(S.program) : null,
         color: S.program ? (S.colorByProgram.get(S.program) || null) : null,
@@ -2393,6 +2475,23 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     };
   }
 
+  // drop draws not seen since minEpoch and rebuild the snapshot cache from what's left, so a long
+  // every-aligner run holds about two aligners' worth of geometry instead of all of them
+  function prune(minEpoch) {
+    contexts.forEach(function (S) {
+      var keep = S.draws.filter(function (r) { return r.epoch >= minEpoch; });
+      if (keep.length === S.draws.length) return;
+      var seen = {}, bySig = {}, cache = new Map(), bytes = 0;
+      keep.forEach(function (r) {
+        seen[r.sig] = true; bySig[r.sig] = r;
+        if (!cache.has(r.vkey)) { cache.set(r.vkey, r.vbytes); bytes += r.vbytes.byteLength; }
+        if (r.ikey && !cache.has(r.ikey)) { cache.set(r.ikey, r.ibytes); bytes += r.ibytes.byteLength; }
+      });
+      S.draws = keep; S.seen = seen; S.drawBySig = bySig; S.snapCache = cache; S.snapBytes = bytes;
+      S.overBudget = false; S.capHit = false;
+    });
+  }
+
   // ---- decode a recorded draw into positions + indices ----
   function readScalar(dv, off, type, normalized) {
     switch (type) {
@@ -2419,7 +2518,9 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     var vbytes = d.vbytes; if (!vbytes) return null;           // bytes snapshotted at draw time
     var vdv = new DataView(vbytes.buffer, vbytes.byteOffset, vbytes.byteLength);
     var cb = compBytes(pos.type), stride = pos.stride || pos.size * cb;
-    var nMax = Math.floor((vbytes.byteLength - pos.offset) / stride);
+    // vertices available: the last one only needs its own attribute bytes, not a full stride
+    var attrBytes = pos.size * cb;
+    var nMax = vbytes.byteLength >= pos.offset + attrBytes ? 1 + Math.floor((vbytes.byteLength - pos.offset - attrBytes) / stride) : 0;
     if (nMax <= 0) return null;
 
     var indices = null;
@@ -2462,17 +2563,18 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
   }
   function r(x) { return Math.round(x * 1000) / 1000; }
 
-  // latestFrame: only the draws of the most recent frame (everything seen within 150 ms of the newest
-  // draw), i.e. what is on screen now rather than every variant drawn this session
+  // latestFrame: only the draws of each canvas's most recent frame (seen within 150 ms of that
+  // canvas's newest draw), i.e. what is on screen now rather than every variant drawn this session.
+  // Per canvas, so another canvas drawing later can't push the dental canvas's frame out.
   function snapshot(sinceEpoch, latestFrame) {
-    var out = [], cutoff = -Infinity;
-    if (latestFrame) {
-      var newest = -Infinity;
-      for (var c0 = 0; c0 < contexts.length; c0++) for (var j = 0; j < contexts[c0].draws.length; j++) if (contexts[c0].draws[j].t > newest) newest = contexts[c0].draws[j].t;
-      cutoff = newest - 150;
-    }
+    var out = [];
     for (var c = 0; c < contexts.length; c++) {
-      var S = contexts[c];
+      var S = contexts[c], cutoff = -Infinity;
+      if (latestFrame) {
+        var newest = -Infinity;
+        for (var j = 0; j < S.draws.length; j++) if (S.draws[j].t > newest) newest = S.draws[j].t;
+        cutoff = newest - 150;
+      }
       for (var i = 0; i < S.draws.length; i++) {
         if (sinceEpoch != null && !(S.draws[i].epoch >= sinceEpoch)) continue;
         if (latestFrame && !(S.draws[i].t >= cutoff)) continue;
@@ -2492,14 +2594,19 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     if (!d || d.source !== TAG) return;
     if (d.kind === "gl-mark") {
       EPOCH++;
+      prune(EPOCH - 1);                  // an every-aligner run: forget aligners older than the last one
       try { window.postMessage({ source: TAG, kind: "gl-mark-ack", token: TOKEN, reqId: d.reqId, epoch: EPOCH }, ORIGIN); } catch (e) {}
       return;
     }
     if (d.kind === "gl-stats-request") {
       // cheap: how many distinct draws were seen since an epoch (no geometry transferred)
-      var n = 0;
-      for (var ci = 0; ci < contexts.length; ci++) for (var di = 0; di < contexts[ci].draws.length; di++) if (contexts[ci].draws[di].epoch >= d.sinceEpoch) n++;
-      try { window.postMessage({ source: TAG, kind: "gl-stats", token: TOKEN, reqId: d.reqId, recent: n }, ORIGIN); } catch (e) {}
+      var n = 0, made = 0;
+      for (var ci = 0; ci < contexts.length; ci++) for (var di = 0; di < contexts[ci].draws.length; di++) {
+        var dr = contexts[ci].draws[di];
+        if (dr.epoch >= d.sinceEpoch) n++;
+        if (dr.created >= d.sinceEpoch) made++;
+      }
+      try { window.postMessage({ source: TAG, kind: "gl-stats", token: TOKEN, reqId: d.reqId, recent: n, created: made }, ORIGIN); } catch (e) {}
       return;
     }
     if (d.kind !== "gl-snapshot-request") return;
@@ -2511,7 +2618,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     try {
       window.postMessage({ source: TAG, kind: "gl-snapshot", token: TOKEN, reqId: reqId, count: payload.length, meshes: payload,
         summary: { contexts: contexts.length, kinds: contexts.map(function (s) { return s.kind; }), totalDraws: contexts.reduce(function (a, s) { return a + s.draws.length; }, 0),
-          budgetExceeded: contexts.some(function (s) { return s.overBudget; }) } }, ORIGIN);
+          budgetExceeded: contexts.some(function (s) { return s.overBudget || s.capHit; }) } }, ORIGIN);
     } catch (e) {
       // if structured clone is too big, send just the manifest
       try { window.postMessage({ source: TAG, kind: "gl-snapshot", token: TOKEN, reqId: reqId, count: payload.length, meshes: [], error: "payload too large: " + String(e && e.message || e), manifestOnly: payload.map(function (m) { return m.meta; }) }, ORIGIN); } catch (e2) {}
@@ -2642,18 +2749,19 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
  *
  * Shared by content.js (extension, ISOLATED world) and userscript_orchestrator.js (one context).
  * Exposes globalThis.TeethAllStages(opts) -> Promise<{ chunks, stageCount, firstStage, lastStage,
- *   steps:[{stage, arches}], missing:[stage], restored }>
- *   opts: { tag, origin, tokens, engine, fflate, bytes, onProgress({done,total,stage}) }
+ *   steps:[{aligner, stage, arches}], missing:[aligner], restored, budgetHit }>
+ *   opts: { tag, origin, tokens, engine, fflate, bytes, onProgress({done,total,stage,aligner}), isCancelled() }
+ * and globalThis.TeethRipStage(opts, stage) -> Promise<{ meshes, restored }>: show one stage, rip
+ *   its frame, put the viewer back (used when "Export this aligner" targets another aligner).
  */
 (function (root) {
   "use strict";
 
   var MAX_ZIP = 2 * 1024 * 1024 * 1024;    // refuse to build more than 2 GB of compressed output
 
-  function TeethAllStages(opts) {
-    var TAG = opts.tag, ORIGIN = opts.origin, tokens = opts.tokens, engine = opts.engine, ff = opts.fflate;
-    var onProgress = opts.onProgress || function () {};
-    var isCancelled = opts.isCancelled || function () { return false; };
+  // the shared machinery: message round trips, waiting for a stage to draw, ripping one stage
+  function makeRig(opts) {
+    var TAG = opts.tag, ORIGIN = opts.origin, tokens = opts.tokens;
     var seq = 0;
 
     function sleep(ms) { return new Promise(function (r) { root.setTimeout(r, ms); }); }
@@ -2678,37 +2786,70 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     }
     function viewer(op, stage) { return request({ kind: "viewer-request", op: op, stage: stage }, "viewer-reply", 6000); }
 
-    // wait until the set of draws seen since `epoch` stops growing (the new gum is drawn a frame
-    // or two after the stage change). Returns the count seen.
+    // wait until the draws seen AND first created since `epoch` both stop changing (the new gum is
+    // drawn a frame or two after the stage change; measured live at under 150 ms). Returns the count.
     async function settle(epoch) {
-      var t0 = Date.now(), lastN = -1, same = 0, n = 0;
+      var t0 = Date.now(), last = "", same = 0, n = 0;
       await sleep(350);
       while (Date.now() - t0 < 7000) {
         var st = await request({ kind: "gl-stats-request", sinceEpoch: epoch }, "gl-stats", 1500);
         n = st ? st.recent : 0;
-        if (n > 0 && n === lastN) { if (++same >= 2 && Date.now() - t0 >= 800) return n; }
+        var made = st ? st.created : 0, key = n + ":" + made;
+        // stable, and either something new was drawn for this stage or long enough has passed that
+        // this stage simply looks like the last one (an arch that didn't move between aligners)
+        if (n > 0 && key === last) { if (++same >= 2 && Date.now() - t0 >= 800 && (made > 0 || Date.now() - t0 >= 1500)) return n; }
         else same = 0;
-        lastN = n;
+        last = key;
         await sleep(250);
       }
       return n;
     }
 
+    // show stage s and rip ONLY the latest frame drawn after the change: an older stage's gum that
+    // happens to be redrawn (orbiting) between the mark and the change can't sneak in
     async function ripStage(s) {
       var mk = await request({ kind: "gl-mark" }, "gl-mark-ack", 2000);
       if (!mk) throw new Error("the 3D capture is not responding; reload the viewer page");
       var r = await viewer("setStage", s);
       if (!r || !r.ok) throw new Error("could not move the viewer to stage " + s + (r && r.error ? ": " + r.error : ""));
+      if (!r.info || r.info.currentStage !== s) throw new Error("the viewer did not move to stage " + s);
       var n = await settle(mk.epoch);
-      if (!n) return [];
-      var snap = await request({ kind: "gl-snapshot-request", sinceEpoch: mk.epoch }, "gl-snapshot", 15000);
-      return (snap && snap.meshes) || [];
+      if (!n) return { meshes: [], budgetHit: false, summary: null, timedOut: false };
+      var snap = await request({ kind: "gl-snapshot-request", sinceEpoch: mk.epoch, latestFrame: true }, "gl-snapshot", 15000);
+      var clean = opts.clean || function (m) { return Array.isArray(m) ? m : []; };
+      return { meshes: clean(snap && snap.meshes), budgetHit: !!(snap && snap.summary && snap.summary.budgetExceeded),
+        summary: (snap && snap.summary) || null, timedOut: !snap };
     }
+
+    return { request: request, viewer: viewer, ripStage: ripStage, sleep: sleep };
+  }
+
+  // one stage, then put the viewer back where it was
+  async function TeethRipStage(opts, stage) {
+    var rig = makeRig(opts);
+    var info = await rig.viewer("info");
+    if (!info || !info.ok || !info.info) throw new Error("can't reach the viewer's step controls on this page");
+    var original = info.info.currentStage, restored = true, after = info.info, got, err = null;
+    try { got = await rig.ripStage(stage); } catch (e) { err = e; }
+    if (original !== stage) {
+      var back = await rig.viewer("setStage", original);
+      restored = !!(back && back.ok && back.info && back.info.currentStage === original);
+      if (back && back.info) after = back.info;
+    }
+    if (err) { if (!restored) err.message += " The viewer couldn't be moved back: set the slider to your aligner again."; throw err; }
+    return { meshes: got.meshes, restored: restored, summary: got.summary, timedOut: got.timedOut, budgetHit: got.budgetHit, viewer: after };
+  }
+
+  function TeethAllStages(opts) {
+    var engine = opts.engine, ff = opts.fflate;
+    var onProgress = opts.onProgress || function () {};
+    var isCancelled = opts.isCancelled || function () { return false; };
+    var rig = makeRig(opts), viewer = rig.viewer;
 
     return (async function () {
       var info = await viewer("info");
       if (!info || !info.ok || !info.info) throw new Error("can't reach the viewer's step controls on this page");
-      // Match the viewer's "Aligner Number N / T" slider one to one. Verified live 2026-10-19:
+      // Match the viewer's "Aligner Number N / T" slider one to one. On the live viewer:
       // aligner N = stage firstStage + N - 1, T = lastStage, and the slider stops at stage lastStage - 1
       // (the final stage in the data is never shown). So export aligners 1..T, named by aligner number.
       var first = info.info.firstStage, last = info.info.lastStage, original = info.info.currentStage;
@@ -2727,15 +2868,17 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
         if (zipBytes > MAX_ZIP) throw new Error("export too large");
       }
 
-      var steps = [], missing = [], manifest = null, restored = false;
+      var steps = [], missing = [], manifest = null, restored = false, budgetHit = false, failure = null;
       try {
         // the viewer only redraws on a change: if it already shows the first stage, step away first
         if (original === first && lastShown > first) await viewer("setStage", first + 1);
+        if (original === first && lastShown === first) await viewer("setStage", Math.min(last, first + 1));
         for (var s = first; s <= lastShown; s++) {
           var aligner = s - first + 1;
           if (isCancelled()) throw new Error("Export cancelled.");
           onProgress({ done: aligner - 1, total: total, stage: s, aligner: aligner });
-          var meshes = await ripStage(s);
+          var got = await rig.ripStage(s), meshes = got.meshes;
+          if (got.budgetHit) budgetHit = true;
           var res = engine.exportFromBundle(opts.bytes, { stage: s, glb: true, glMeshes: meshes });
           var arches = ((res.gumInfo && res.gumInfo.gums) || []).map(function (g) { return g.arch; });
           if (arches.length < 2) missing.push(aligner);
@@ -2745,9 +2888,14 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
           for (var path in laid) addFile(path, laid[path]);
           res = null; laid = null; meshes = null;     // let this stage's raw files go
         }
+        if (isCancelled()) throw new Error("Export cancelled.");     // a cancel during the last aligner counts too
         onProgress({ done: total, total: total, stage: lastShown, aligner: total });
-      } finally {
-        try { var back = await viewer("setStage", original); restored = !!(back && back.ok); } catch (e) {}
+      } catch (e) { failure = e; }
+      try { var back = await viewer("setStage", original); restored = !!(back && back.ok && back.info && back.info.currentStage === original); } catch (e) {}
+      if (!failure && isCancelled()) failure = new Error("Export cancelled.");   // cancelled while the viewer was moving back
+      if (failure) {
+        if (!restored) failure.message += " The viewer couldn't be moved back: set the slider to your aligner again.";
+        throw failure;
       }
 
       var readme = [
@@ -2764,6 +2912,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
         missing.length
           ? "Gum not captured for aligner(s) " + missing.join(", ") + ": those folders use teeth-only files at the top for the missing arch."
           : "Both gums captured for every aligner.",
+        budgetHit ? "NOTE: the capture memory limit was reached during this run, which is why some gums are missing. Reload the viewer page and run it again." : "",
         "",
         "manifest.json              per-tooth arch / UNS number / width (mm)",
         "Teeth are an exact extraction. Gums are the viewer's own generated surface for each stage."
@@ -2772,11 +2921,12 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
       addFile("manifest.json", new TextEncoder().encode(JSON.stringify({ alignerCount: total, stages: steps, teeth: manifest }, null, 2)));
       zip.end();
       if (zipErr) throw zipErr;
-      return { chunks: chunks, bytes: zipBytes, stageCount: total, firstStage: first, lastStage: last, steps: steps, missing: missing, restored: restored };
+      return { chunks: chunks, bytes: zipBytes, stageCount: total, firstStage: first, lastStage: last, steps: steps, missing: missing, restored: restored, budgetHit: budgetHit, original: original };
     })();
   }
 
   root.TeethAllStages = TeethAllStages;
+  root.TeethRipStage = TeethRipStage;
 })(typeof globalThis !== "undefined" ? globalThis : this);
 
 
@@ -2818,9 +2968,10 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     var state = {
       bytes: null, url: "", size: 0, capturedAt: 0,      // the WCC bundle
       resources: [], payloads: {}, seen: {}, keptBytes: 0, // diagnostics: every recorded response
-      tokens: {},                                         // tokens announced by our MAIN-world scripts
+      tokens: Object.create(null),                        // tokens announced by our MAIN-world scripts (no prototype keys)
+      hellos: 0, locked: false,                           // the token list closes after our own announcements
       glReqId: 0, glPending: null,                        // WebGL snapshot round trip
-      maxStage: null, currentStep: null, stepTotal: null, stepSource: null,
+      maxStage: null, currentStep: null, stepTotal: null, stepSource: null, firstStage: 0,
       busy: null, progress: null, cancelled: false        // command in flight + every-aligner progress
     };
 
@@ -2833,7 +2984,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
         onChange: function (info) {
           if (state.stepSource === "viewer") return;
           state.currentStep = info.stage; state.stepTotal = info.total; state.stepSource = info.source;
-          emit("onStep", { aligner: info.stage + 1, total: info.total });
+          emit("onStep", { aligner: alignerOf(info.stage), total: info.total });
         }
       });
       probe.start();
@@ -2841,10 +2992,26 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     // which stage to export: the Advanced override (typed as the viewer's aligner number) wins
     function resolveStage(override) {
       if (override != null && override !== "") {
-        var s = Math.max(0, (override | 0) - 1);
+        var s = Math.max(0, state.firstStage + (override | 0) - 1);
         return state.maxStage != null ? Math.min(state.maxStage, s) : s;
       }
       return state.currentStep != null ? state.currentStep : 0;
+    }
+
+    // a stage number from the viewer: a small non-negative integer
+    function isStage(n) { return typeof n === "number" && isFinite(n) && n >= 0 && n <= 10000 && Math.floor(n) === n; }
+    // the viewer's "Aligner Number" for an engine stage (verified live: aligner 1 = firstStage)
+    function alignerOf(stage) { return stage - state.firstStage + 1; }
+    // ripped meshes from the page: keep only well-formed typed arrays
+    function cleanMeshes(list) {
+      if (!Array.isArray(list)) return [];
+      var budget = 3 * 8000000;                       // floats across all meshes (the real frame is ~0.2M)
+      return list.filter(function (m) {
+        var ok = m && m.positions instanceof Float32Array && m.indices instanceof Uint32Array &&
+          m.positions.length % 3 === 0 && m.positions.length <= 3 * 4000000 && m.indices.length <= 3 * 10000000 &&
+          (budget -= m.positions.length) >= 0;
+        return ok;
+      });
     }
 
     // ---- diagnostics helpers ----
@@ -2883,33 +3050,52 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
       if (ev.origin !== location.origin && ev.origin !== "null") return;
       var d = ev.data;
       if (!d || d.source !== TAG) return;
-      if (d.kind === "hello") { if (typeof d.token === "string") state.tokens[d.token] = true; return; }
-      if (!d.token || !state.tokens[d.token]) return;            // reject forged / pre-token messages
+      // Our three MAIN-world scripts (capture, webgl_capture, viewer_bridge) each post one hello at
+      // document_start, before page code runs, so the first three are ours. After that, or once real
+      // traffic starts, no new token is accepted. This stops a page script from registering its own.
+      // It is not secrecy (the page can read our tokens off this window), so every payload below is
+      // still type-checked and bounded; the hard boundary is ev.source === window.
+      if (d.kind === "hello") {
+        if (!state.locked && state.hellos < 3 && typeof d.token === "string" && d.token.length >= 8) { state.tokens[d.token] = true; state.hellos++; }
+        if (state.hellos >= 3) state.locked = true;
+        return;
+      }
+      if (typeof d.token !== "string" || state.tokens[d.token] !== true) return;
+      state.locked = true;
 
       if (d.kind === "gl-snapshot") {
         var p = state.glPending;
         if (!p || d.reqId !== p.id) return;                      // a late reply to an older request
         state.glPending = null;
-        p.resolve({ meshes: Array.isArray(d.meshes) ? d.meshes : [], summary: d.summary || { error: d.error || null } });
+        p.resolve({ meshes: cleanMeshes(d.meshes), summary: (d.summary && typeof d.summary === "object") ? d.summary : { error: d.error || null } });
         return;
       }
       if (d.kind === "viewer-stage" && d.info) {
-        state.currentStep = d.info.currentStage; state.stepTotal = d.info.lastStage; state.stepSource = "viewer";
-        if (state.busy !== "allStages") emit("onStep", { aligner: d.info.currentStage - d.info.firstStage + 1, total: d.info.lastStage });
+        var vi = d.info;
+        if (!isStage(vi.currentStage) || !isStage(vi.firstStage) || !isStage(vi.lastStage) || vi.firstStage > vi.lastStage) return;
+        state.currentStep = vi.currentStage; state.firstStage = vi.firstStage; state.stepTotal = vi.lastStage - vi.firstStage;
+        state.stepSource = "viewer";
+        if (state.busy !== "allStages") emit("onStep", { aligner: alignerOf(vi.currentStage), total: state.stepTotal });
         return;
       }
-      if (d.kind === "wcc" && d.bytes) {
+      if (d.kind === "wcc" && d.bytes instanceof ArrayBuffer) {
         if (d.bytes.byteLength > MAX_BYTES) return;
         var wb = new Uint8Array(d.bytes);
         if (!MAGIC.zip(wb)) return;                              // must really be a ZIP
-        state.bytes = wb; state.url = d.url || ""; state.size = wb.length; state.capturedAt = Date.now();
-        try { state.maxStage = engine.stageRange(wb).max; } catch (e) {}
+        // only a real treatment-plan bundle replaces the scan: another zip the portal fetches later
+        // (or junk) must not clobber a good capture
+        var range;
+        try { range = engine.stageRange(wb); } catch (e) { return; }
+        state.bytes = wb; state.url = typeof d.url === "string" ? d.url : ""; state.size = wb.length; state.capturedAt = Date.now();
+        state.maxStage = range.max;
         ensureProbe();
         emit("onCapture", state);
         return;
       }
       if (d.kind === "resource") {
-        var key = (d.url || "") + "|" + d.size;
+        if (typeof d.url !== "string" || typeof d.size !== "number") return;
+        if (d.bytes != null && !(d.bytes instanceof ArrayBuffer)) return;
+        var key = d.url + "|" + d.size;
         if (state.seen[key]) return;
         state.seen[key] = true;
         var rec = { url: d.url || "", ct: d.ct || "", size: d.size || 0, fmt: d.fmt || null, file: null };
@@ -2957,13 +3143,32 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
       // the aligner on screen: exact teeth + the real gums ripped from WebGL
       fullMouth: function (args) {
         var stage = resolveStage(args && args.override);
-        return snapshot().then(function (snap) {
+        var onScreen = state.stepSource === "viewer" && state.currentStep === stage;
+        var gather;
+        if (!onScreen && state.stepSource === "viewer") {
+          // another aligner than the one on screen: show it, rip its gums, put the viewer back
+          gather = root.TeethRipStage({ tag: TAG, origin: ORIGIN, tokens: state.tokens, clean: cleanMeshes }, stage)
+            .then(function (r) {
+              // the viewer is back (or not): take its reported stage now, not at the next 500 ms push
+              if (r.viewer && isStage(r.viewer.currentStage)) state.currentStep = r.viewer.currentStage;
+              return { snap: { meshes: r.meshes, summary: r.summary, timedOut: r.timedOut }, restored: r.restored };
+            });
+        } else {
+          // the aligner on screen: its latest frame first; all drawn variants only as a fallback
+          gather = snapshot(true).then(function (snap) {
+            var probe = engine.exportFromBundle(state.bytes, { stage: stage, glb: false, glMeshes: snap.meshes || [] });
+            if (((probe.gumInfo && probe.gumInfo.gums) || []).length >= 2) return { snap: snap, restored: true };
+            return snapshot(false).then(function (all) { return { snap: all.meshes && all.meshes.length ? all : snap, restored: true }; });
+          });
+        }
+        return gather.then(function (g) {
+          var snap = g.snap;
           var res = engine.exportFromBundle(state.bytes, { stage: stage, glb: true, glMeshes: snap.meshes || [] });
           var gums = (res.gumInfo && res.gumInfo.gums) || [];
           var arches = gums.map(function (g) { return g.arch; });
           var lines = [
             "Teeth Exporter (unofficial)",
-            "Aligner Number " + (stage + 1) + "  |  units: millimeters, true scale", "",
+            "Aligner Number " + alignerOf(stage) + "  |  units: millimeters, true scale", "",
             gums.length
               ? "Real gums included: " + arches.join(" + ") + "   (fit: " + gums.map(function (g) { return g.arch + " " + g.cost + "mm"; }).join(", ") + ")"
               : (snap.timedOut
@@ -2991,19 +3196,21 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
           // same layout as each folder of the every-aligner export: everyday files on top, rest in Advanced/
           download(engine.zipOutputs(engine.layoutStage(res.outputs, ""), { "Advanced/manifest.json": text(JSON.stringify(res.manifest, null, 2)), "Advanced/README.txt": text(lines.join("\n")) }),
             "teeth_exporter_full_mouth_" + ts() + ".zip");
-          return { ok: true, aligner: stage + 1, teeth: res.stats.teeth, arches: arches, timedOut: !!snap.timedOut };
+          return { ok: true, aligner: alignerOf(stage), teeth: res.stats.teeth, arches: arches, timedOut: !!snap.timedOut, restored: g.restored,
+            gumsFromScreen: !onScreen && state.stepSource !== "viewer" };
         });
       },
       // every aligner with its real gums, one folder each (all_stages.js steps the viewer)
       allStages: function () {
         state.progress = { aligner: null, total: null };
         return root.TeethAllStages({
-          tag: TAG, origin: ORIGIN, tokens: state.tokens, engine: engine, fflate: root.fflate, bytes: state.bytes,
+          tag: TAG, origin: ORIGIN, tokens: state.tokens, engine: engine, fflate: root.fflate, bytes: state.bytes, clean: cleanMeshes,
           onProgress: function (p) { state.progress = { aligner: p.aligner, total: p.total }; emit("onProgress", state.progress); },
           isCancelled: function () { return state.cancelled; }
         }).then(function (res) {
           download(res.chunks, "teeth_exporter_all_aligners_" + ts() + ".zip");
-          return { ok: true, count: res.stageCount, missing: res.missing, bytes: res.bytes };
+          return { ok: true, count: res.stageCount, missing: res.missing, bytes: res.bytes, restored: res.restored,
+            budgetHit: res.budgetHit, backTo: res.original - res.firstStage + 1 };
         });
       },
       // the untouched scan file the viewer loaded (backup, offline tools, bug reports)
@@ -3013,8 +3220,10 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
       },
       // every mesh/archive the viewer downloaded + a redacted index of all responses
       diag: function () {
-        var entries = {};
-        for (var name in state.payloads) entries[name] = state.payloads[name];
+        // zips are left out: the scan bundle itself is one, and it carries treatment-plan identifiers
+        // (it has its own clearly labeled "Download raw scan" button)
+        var entries = {}, kept = 0;
+        for (var name in state.payloads) if (!/\.zip$/i.test(name)) { entries[name] = state.payloads[name]; kept++; }
         entries["index.json"] = text(JSON.stringify({
           capturedAt: new Date().toISOString(),
           wccBundle: state.bytes ? { size: state.size, url: safeUrl(state.url) } : null,
@@ -3022,7 +3231,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
           allResponses: state.resources.map(function (r) { return { url: safeUrl(r.url), ct: r.ct, size: r.size, fmt: r.fmt, file: r.file }; })
         }, null, 2));
         download(engine.zipOutputs({}, entries), "teeth_exporter_diagnostics_" + ts() + ".zip");
-        return Promise.resolve({ ok: true, files: Object.keys(state.payloads).length, responses: state.resources.length });
+        return Promise.resolve({ ok: true, files: kept, responses: state.resources.length });
       },
       // what's on screen right now as a clean GLB: the latest frame's 3D meshes in the viewer's own
       // frame, unregistered (troubleshooting). Teeth white, gums pink.
@@ -3063,7 +3272,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     function status() {
       return {
         captured: !!state.bytes, size: state.size,
-        aligner: state.currentStep != null ? state.currentStep + 1 : null, total: state.stepTotal,
+        aligner: state.currentStep != null ? alignerOf(state.currentStep) : null, total: state.stepTotal,
         busy: state.busy, progress: state.busy === "allStages" ? state.progress : null,
         files: Object.keys(state.payloads).length
       };
@@ -3111,7 +3320,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
 
   // The look. Kept as a theme table so a future variant only adds colors, never layout.
   var THEMES = {
-    mint: {                      // the chosen look (Jason, 2026-10-19)
+    mint: {
       paper: "#FFFFFF", ink: "#16302B", ink2: "#4F6B65", ink3: "#93A8A3", line: "#E4EFEC", soft: "#EEF8F5",
       primary: "#2BB58A", primaryHover: "#239C76", primaryInk: "#FFFFFF", chip: "#DDF5EC", chipInk: "#17785A",
       ok: "#2BB58A", err: "#D9534F", errBg: "#FDECEA", radius: "16px", btnRadius: "12px", head: "#F3FBF8",
@@ -3296,7 +3505,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     field.appendChild(el("span", "te-label", "Aligner number"));
     var input = el("input", "te-input"); input.type = "number"; input.min = "1"; input.placeholder = "current";
     field.appendChild(input);
-    var hintField = el("p", "te-hint", "Blank exports the aligner on screen. A number exports that aligner instead, numbered like the viewer's slider.");
+    var hintField = el("p", "te-hint", "Blank exports the aligner on screen. A number exports that aligner instead, numbered like the viewer's slider. The viewer briefly moves there to capture its gums.");
     var btnRaw = el("button", "te-btn te-btn--quiet", "Download raw scan");
     var hintRaw = el("p", "te-hint", "The original scan file, untouched. A backup of your data, and the file to send with a bug report.");
     var rule = el("div", "te-rule");
@@ -3305,7 +3514,7 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     var btnDiag = el("button", "te-btn te-btn--quiet", "Download captured files");
     var btnGl = el("button", "te-btn te-btn--quiet", "Download rendered 3D");
     stack.appendChild(btnDiag); stack.appendChild(btnGl);
-    var hintDiag = el("p", "te-hint", "For bug reports. Case IDs and private links are removed from the file list.");
+    var hintDiag = el("p", "te-hint", "For bug reports. Your scan is not included, and case IDs and private links are removed from the file list.");
     [field, hintField, btnRaw, hintRaw, rule, sub, stack, hintDiag].forEach(function (n) { advBody.appendChild(n); });
     adv.appendChild(advBody);
 
@@ -3349,8 +3558,11 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
     function overrideValue() { var v = (input.value || "").trim(); return v === "" ? null : (parseInt(v, 10) || 1); }
 
     function describe(name, r) {
+      var back = r.restored === false ? " The viewer couldn't be moved back: set the slider to your aligner again." : "";
       if (name === "fullMouth") {
         var a = r.arches || [];
+        if (back) return ["Saved aligner " + r.aligner + "." + back, true];
+        if (r.gumsFromScreen) return ["Saved aligner " + r.aligner + ". This viewer can't be moved by the tool, so the gums are from the aligner on screen.", true];
         if (a.length >= 2) return ["Saved aligner " + r.aligner + ": " + r.teeth + " teeth and both gums.", false];
         if (a.length === 1) return ["Saved aligner " + r.aligner + " with only the " + (a[0] === "U" ? "upper" : "lower") + " gum. Orbit to show the other gum, then export again.", true];
         return [r.timedOut
@@ -3359,10 +3571,13 @@ if (typeof globalThis !== "undefined") globalThis.CTM = CTM;
       }
       if (name === "allStages") {
         var miss = r.missing && r.missing.length;
-        return ["Saved " + r.count + " aligners with real gums (" + fmtSize(r.bytes) + ")." + (miss ? " Gum missing on aligner " + r.missing.join(", ") + "." : ""), !!miss];
+        var t = "Saved " + r.count + " aligners with real gums (" + fmtSize(r.bytes) + ").";
+        if (miss) t += " Gum missing on aligner " + r.missing.join(", ") + "." + (r.budgetHit ? " The capture ran out of memory: reload the viewer page and run it again." : "");
+        if (r.restored === false) t += " The viewer couldn't be moved back to aligner " + r.backTo + ": set the slider yourself.";
+        return [t, !!miss || r.restored === false];
       }
       if (name === "raw") return ["Saved the raw scan (" + fmtSize(r.bytes) + ").", false];
-      if (name === "diag") return ["Saved " + r.files + " captured files and an index of " + r.responses + " responses.", false];
+      if (name === "diag") return ["Saved " + r.files + " captured files and an index of " + r.responses + " responses. Your scan itself is not included.", false];
       if (name === "glCapture") return ["Saved " + r.count + " rendered meshes." + (r.skipped ? " Left out " + r.skipped + " with broken data." : ""), false];
       return ["Done.", false];
     }

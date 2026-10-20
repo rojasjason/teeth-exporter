@@ -31,6 +31,7 @@
   var MAX_DRAWS = 4000;        // distinct draw signatures to remember
   var MAX_BUF = 64 * 1024 * 1024;
   var MAX_SNAP_TOTAL = 192 * 1024 * 1024;  // total bytes of draw-time snapshots kept per context
+  var MAX_BUF_TOTAL = 256 * 1024 * 1024;   // total bytes of live upload copies kept per context
 
   // ---- GL constant byte sizes ----
   function compBytes(type) {
@@ -69,7 +70,9 @@
       colorByProgram: new Map(),          // program -> last vec4-ish uniform seen (color guess)
       snapCache: new Map(), snapBytes: 0, // fingerprint -> shared byte copy; total kept bytes
       fps: new Map(),                     // WebGLBuffer -> content hash of its current bytes
-      overBudget: false                   // a draw was dropped because MAX_SNAP_TOTAL was hit
+      bufBytes: 0,                        // running total of S.buffers
+      overBudget: false,                  // a draw was dropped because MAX_SNAP_TOTAL was hit
+      capHit: false                       // a new draw was dropped because MAX_DRAWS was hit
     };
     contexts.push(S);
 
@@ -86,22 +89,49 @@
         if (S.curVAO) setVAO(S.curVAO).element = buffer; else S.globalElement = buffer;
       }
     });
-    wrap("bufferData", function (target, data) {
-      var buf = (target === gl.ELEMENT_ARRAY_BUFFER) ? S.boundElement : S.boundArray;
-      if (!buf || typeof data === "number") return;            // sized-only alloc, no data
-      // always COPY: a bare ArrayBuffer is often a scratch buffer the viewer reuses for the next mesh
-      var bytes = data.buffer ? new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)) : new Uint8Array(data.slice(0));
+    // the buffer an upload lands in: element uploads follow the bound VAO's element binding
+    function targetBuf(target) { return (target === gl.ELEMENT_ARRAY_BUFFER) ? elementBuf() : S.boundArray; }
+    // copy the uploaded bytes, honoring WebGL2's (srcOffset, length) in elements of a typed view.
+    // Always a COPY: a bare ArrayBuffer is often a scratch buffer the viewer reuses for the next mesh.
+    function setBuf(buf, bytes) {                    // keep one upload copy, within the aggregate cap
+      var old = S.buffers.get(buf);
+      if (old) S.bufBytes -= old.byteLength;
+      S.buffers.delete(buf);
+      if (!bytes || bytes.byteLength > MAX_BUF || S.bufBytes + bytes.byteLength > MAX_BUF_TOTAL) return;
+      S.buffers.set(buf, bytes); S.bufBytes += bytes.byteLength;
+    }
+    function viewLen(data, srcOffset, length) {      // bytes an upload would copy, without copying
+      if (data.buffer) { var esz = data.BYTES_PER_ELEMENT || 1; return length ? length * esz : data.byteLength - (srcOffset ? srcOffset * esz : 0); }
+      return data.byteLength;
+    }
+    function srcBytes(data, srcOffset, length) {
+      if (data.buffer) {
+        var esz = data.BYTES_PER_ELEMENT || 1;
+        var start = data.byteOffset + (srcOffset ? srcOffset * esz : 0);
+        var end = length ? start + length * esz : data.byteOffset + data.byteLength;
+        return new Uint8Array(data.buffer.slice(start, Math.min(end, data.byteOffset + data.byteLength)));
+      }
+      return new Uint8Array(data.slice(0));
+    }
+    wrap("bufferData", function (target, data, usage, srcOffset, length) {
+      var buf = targetBuf(target);
+      if (!buf) return;
       S.fps.delete(buf);
-      if (bytes.byteLength <= MAX_BUF) S.buffers.set(buf, bytes); else S.buffers.delete(buf);
+      if (typeof data === "number" || !data || viewLen(data, srcOffset, length) > MAX_BUF) { setBuf(buf, null); return; }
+      setBuf(buf, srcBytes(data, srcOffset, length));
     });
-    wrap("bufferSubData", function (target, offset, data) {
-      var buf = (target === gl.ELEMENT_ARRAY_BUFFER) ? S.boundElement : S.boundArray;
+    wrap("bufferSubData", function (target, offset, data, srcOffset, length) {
+      var buf = targetBuf(target);
       if (!buf || !data || typeof data === "number") return;
-      var bytes = data.buffer ? new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)) : new Uint8Array(data);
-      var cur = S.buffers.get(buf);
-      if (!cur || cur.byteLength < offset + bytes.byteLength) { var nb = new Uint8Array(Math.max(offset + bytes.byteLength, cur ? cur.byteLength : 0)); if (cur) nb.set(cur); cur = nb; }
-      cur.set(bytes, offset); S.buffers.set(buf, cur); S.fps.delete(buf);
+      S.fps.delete(buf);
+      var need = offset + viewLen(data, srcOffset, length);
+      if (need > MAX_BUF) { setBuf(buf, null); return; }                 // never grow past the cap
+      var bytes = srcBytes(data, srcOffset, length), cur = S.buffers.get(buf);
+      if (!cur || cur.byteLength < need) { var nb = new Uint8Array(Math.max(need, cur ? cur.byteLength : 0)); if (cur) nb.set(cur); cur = nb; }
+      cur.set(bytes, offset); setBuf(buf, cur);
     });
+    // a deleted GL buffer's copy is dead weight: drop it so long sessions don't grow without bound
+    wrap("deleteBuffer", function (buf) { if (buf) { setBuf(buf, null); S.fps.delete(buf); } });
     wrap("vertexAttribPointer", function (loc, size, type, normalized, stride, offset) {
       attribTable()[loc] = { buffer: S.boundArray, size: size, type: type, normalized: !!normalized, stride: stride, offset: offset, enabled: true };
     });
@@ -145,7 +175,6 @@
     }
 
     function record(mode, count, indexType, indexOffset, drawType) {
-      if (S.draws.length >= MAX_DRAWS) return;
       var attribs = attribTable();
       var locs = Object.keys(attribs).filter(function (l) { return attribs[l].enabled && attribs[l].buffer; });
       if (!locs.length) return;
@@ -159,9 +188,12 @@
       // layout signature + content fingerprint => dedupe identical geometry across frames,
       // while keeping distinct geometry that happens to share a layout.
       var vfp = fpFor(pos.buffer, posBytes);
-      var sig = drawType + "|" + (S.program ? progId(S.program) : "-") + "|" + mode + "|" + count + "|" + locs.map(function (l) { var a = attribs[l]; return l + ":" + a.size + ":" + a.type + ":" + a.stride + ":" + a.offset; }).join(",") + "|" + indexType + ":" + indexOffset + "|fp:" + vfp;
+      var ifp = elemBytes ? fpFor(elemBuf, elemBytes) : "-";   // same vertices, new triangles = a new draw
+      var sig = drawType + "|" + (S.program ? progId(S.program) : "-") + "|" + mode + "|" + count + "|" + locs.map(function (l) { var a = attribs[l]; return l + ":" + a.size + ":" + a.type + ":" + a.stride + ":" + a.offset; }).join(",") + "|" + indexType + ":" + indexOffset + "|fp:" + vfp + "|ifp:" + ifp;
       var now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
       if (S.seen[sig]) { var known = S.drawBySig[sig]; if (known) { known.epoch = EPOCH; known.t = now; } return; }
+      // the cap applies to NEW draws only, so known draws above keep getting fresh epochs/timestamps
+      if (S.draws.length >= MAX_DRAWS) { S.capHit = true; return; }
       // snapshot the referenced bytes AT DRAW TIME so a later overwrite can't corrupt them.
       // Copies are shared via a content-fingerprint cache (many draws reference the same upload,
       // e.g. one interleaved buffer per model) and bounded by MAX_SNAP_TOTAL so stage-scrubbing /
@@ -173,14 +205,16 @@
         c = new Uint8Array(bytes); S.snapBytes += c.byteLength; S.snapCache.set(key, c);
         return c;
       }
-      var vcopy = snap(posBytes, "v:" + posBytes.byteLength + ":" + vfp);
-      var icopy = elemBytes ? snap(elemBytes, "i:" + fpFor(elemBuf, elemBytes)) : null;
+      var vkey = "v:" + posBytes.byteLength + ":" + vfp, ikey = elemBytes ? "i:" + ifp : null;
+      var vcopy = snap(posBytes, vkey);
+      var icopy = elemBytes ? snap(elemBytes, ikey) : null;
       // over budget: keep what we have, and say so. The signature is NOT burned, so the draw is
       // retried (and can still be kept) if budget frees up; nothing is silently marked "seen".
       if (!vcopy || (elemBytes && !icopy)) { S.overBudget = true; return; }
       S.seen[sig] = true;
       var rec = {
         epoch: EPOCH, t: now,                                  // t = last time this draw was seen (latest-frame filter)
+        created: EPOCH, sig: sig, vkey: vkey, ikey: ikey,      // for gl-stats and pruning
         mode: mode, count: count, drawType: drawType, indexType: indexType, indexOffset: indexOffset,
         program: S.program ? progId(S.program) : null,
         color: S.program ? (S.colorByProgram.get(S.program) || null) : null,
@@ -213,6 +247,23 @@
     };
   }
 
+  // drop draws not seen since minEpoch and rebuild the snapshot cache from what's left, so a long
+  // every-aligner run holds about two aligners' worth of geometry instead of all of them
+  function prune(minEpoch) {
+    contexts.forEach(function (S) {
+      var keep = S.draws.filter(function (r) { return r.epoch >= minEpoch; });
+      if (keep.length === S.draws.length) return;
+      var seen = {}, bySig = {}, cache = new Map(), bytes = 0;
+      keep.forEach(function (r) {
+        seen[r.sig] = true; bySig[r.sig] = r;
+        if (!cache.has(r.vkey)) { cache.set(r.vkey, r.vbytes); bytes += r.vbytes.byteLength; }
+        if (r.ikey && !cache.has(r.ikey)) { cache.set(r.ikey, r.ibytes); bytes += r.ibytes.byteLength; }
+      });
+      S.draws = keep; S.seen = seen; S.drawBySig = bySig; S.snapCache = cache; S.snapBytes = bytes;
+      S.overBudget = false; S.capHit = false;
+    });
+  }
+
   // ---- decode a recorded draw into positions + indices ----
   function readScalar(dv, off, type, normalized) {
     switch (type) {
@@ -239,7 +290,9 @@
     var vbytes = d.vbytes; if (!vbytes) return null;           // bytes snapshotted at draw time
     var vdv = new DataView(vbytes.buffer, vbytes.byteOffset, vbytes.byteLength);
     var cb = compBytes(pos.type), stride = pos.stride || pos.size * cb;
-    var nMax = Math.floor((vbytes.byteLength - pos.offset) / stride);
+    // vertices available: the last one only needs its own attribute bytes, not a full stride
+    var attrBytes = pos.size * cb;
+    var nMax = vbytes.byteLength >= pos.offset + attrBytes ? 1 + Math.floor((vbytes.byteLength - pos.offset - attrBytes) / stride) : 0;
     if (nMax <= 0) return null;
 
     var indices = null;
@@ -282,17 +335,18 @@
   }
   function r(x) { return Math.round(x * 1000) / 1000; }
 
-  // latestFrame: only the draws of the most recent frame (everything seen within 150 ms of the newest
-  // draw), i.e. what is on screen now rather than every variant drawn this session
+  // latestFrame: only the draws of each canvas's most recent frame (seen within 150 ms of that
+  // canvas's newest draw), i.e. what is on screen now rather than every variant drawn this session.
+  // Per canvas, so another canvas drawing later can't push the dental canvas's frame out.
   function snapshot(sinceEpoch, latestFrame) {
-    var out = [], cutoff = -Infinity;
-    if (latestFrame) {
-      var newest = -Infinity;
-      for (var c0 = 0; c0 < contexts.length; c0++) for (var j = 0; j < contexts[c0].draws.length; j++) if (contexts[c0].draws[j].t > newest) newest = contexts[c0].draws[j].t;
-      cutoff = newest - 150;
-    }
+    var out = [];
     for (var c = 0; c < contexts.length; c++) {
-      var S = contexts[c];
+      var S = contexts[c], cutoff = -Infinity;
+      if (latestFrame) {
+        var newest = -Infinity;
+        for (var j = 0; j < S.draws.length; j++) if (S.draws[j].t > newest) newest = S.draws[j].t;
+        cutoff = newest - 150;
+      }
       for (var i = 0; i < S.draws.length; i++) {
         if (sinceEpoch != null && !(S.draws[i].epoch >= sinceEpoch)) continue;
         if (latestFrame && !(S.draws[i].t >= cutoff)) continue;
@@ -312,14 +366,19 @@
     if (!d || d.source !== TAG) return;
     if (d.kind === "gl-mark") {
       EPOCH++;
+      prune(EPOCH - 1);                  // an every-aligner run: forget aligners older than the last one
       try { window.postMessage({ source: TAG, kind: "gl-mark-ack", token: TOKEN, reqId: d.reqId, epoch: EPOCH }, ORIGIN); } catch (e) {}
       return;
     }
     if (d.kind === "gl-stats-request") {
       // cheap: how many distinct draws were seen since an epoch (no geometry transferred)
-      var n = 0;
-      for (var ci = 0; ci < contexts.length; ci++) for (var di = 0; di < contexts[ci].draws.length; di++) if (contexts[ci].draws[di].epoch >= d.sinceEpoch) n++;
-      try { window.postMessage({ source: TAG, kind: "gl-stats", token: TOKEN, reqId: d.reqId, recent: n }, ORIGIN); } catch (e) {}
+      var n = 0, made = 0;
+      for (var ci = 0; ci < contexts.length; ci++) for (var di = 0; di < contexts[ci].draws.length; di++) {
+        var dr = contexts[ci].draws[di];
+        if (dr.epoch >= d.sinceEpoch) n++;
+        if (dr.created >= d.sinceEpoch) made++;
+      }
+      try { window.postMessage({ source: TAG, kind: "gl-stats", token: TOKEN, reqId: d.reqId, recent: n, created: made }, ORIGIN); } catch (e) {}
       return;
     }
     if (d.kind !== "gl-snapshot-request") return;
@@ -331,7 +390,7 @@
     try {
       window.postMessage({ source: TAG, kind: "gl-snapshot", token: TOKEN, reqId: reqId, count: payload.length, meshes: payload,
         summary: { contexts: contexts.length, kinds: contexts.map(function (s) { return s.kind; }), totalDraws: contexts.reduce(function (a, s) { return a + s.draws.length; }, 0),
-          budgetExceeded: contexts.some(function (s) { return s.overBudget; }) } }, ORIGIN);
+          budgetExceeded: contexts.some(function (s) { return s.overBudget || s.capHit; }) } }, ORIGIN);
     } catch (e) {
       // if structured clone is too big, send just the manifest
       try { window.postMessage({ source: TAG, kind: "gl-snapshot", token: TOKEN, reqId: reqId, count: payload.length, meshes: [], error: "payload too large: " + String(e && e.message || e), manifestOnly: payload.map(function (m) { return m.meta; }) }, ORIGIN); } catch (e2) {}

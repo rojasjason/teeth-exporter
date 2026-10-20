@@ -76,14 +76,14 @@ const START_HTML = `<!DOCTYPE html>
     <li><strong>No gums in the file?</strong> That arch wasn't drawn yet. Orbit so both arches' gums face the camera, then click Export again.</li>
     <li><strong>Want every aligner?</strong> Click "Export every aligner": one folder per aligner, each with its real gums. Keep the tab on screen while it runs.</li>
     <li><strong>Just want teeth?</strong> Every zip has teeth-only files in its <code>Advanced</code> folder.</li>
-    <li><strong>Your portal is a different website?</strong> Tell Jason the address — it's a one-line fix.</li>
+    <li><strong>Your portal is a different website?</strong> Send the address to the person who shared this with you; it's a one-line fix.</li>
   </ul>
 
   <p class="warn">Unofficial. Not affiliated with, authorized by, or endorsed by Align Technology, Invisalign, or ClinCheck.
   Use it only on <strong>your own</strong> treatment plan. Everything runs locally in your browser; nothing is uploaded.
   Exported models are for personal/educational use, not clinical decisions.</p>
 
-  <p class="muted">Found a bug or have feedback? Note which viewer/portal you used and what happened, and send it to Jason — that's the whole point of the beta. 🙏</p>
+  <p class="muted">Found a bug or have feedback? Note which viewer/portal you used and what happened, and send it to the person who shared this with you.</p>
 </div></body></html>
 `;
 
@@ -112,7 +112,7 @@ Tips
 - "Export every aligner" saves one folder per aligner, each with its real gums.
   Keep the tab on screen while it runs.
 - Teeth-only files are in each zip's "Advanced" folder.
-- Different portal website? Send Jason the address; it's a one-line fix.
+- Different portal website? Send the address to the person who shared this; it's a one-line fix.
 
 Everything runs locally in your browser. Nothing is uploaded.
 Unofficial - not affiliated with Align Technology / Invisalign / ClinCheck.

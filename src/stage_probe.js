@@ -95,15 +95,11 @@
       if (c[0].score < 85) return null;
       var best = c[0];
       // map to 0-based engine stage (stages 0..maxStage):
-      //   total == maxStage+1  -> 1-indexed control (1..maxStage+1), even when min is missing
-      //   total == maxStage, min 1 -> control counts stages 1..maxStage directly
-      //   otherwise            -> offset by the control's min
+      // Controls count ALIGNERS, which start at 1: the live ClinCheck viewer shows "Aligner Number 1 / 21"
+      // at stage 0 and "21 / 21" at stage 20, so aligner N = stage N - 1. A 1-based control (min 1,
+      // or text, or a total of maxStage+1 with no min) maps N -> N - 1; a 0-based one maps directly.
       var offset = best.min;
-      // text labels are 1-based aligner numbers: the live ClinCheck viewer shows "Aligner Number 1 / 21"
-      // at stage 0 and "21 / 21" at stage 20 (verified 2026-10-19), so label N = stage N - 1
-      if (best.source === "text") offset = 1;
-      else if (best.total === maxStage + 1) offset = 1;
-      else if (best.total === maxStage && best.min === 1) offset = 0;
+      if (best.source === "text" || best.total === maxStage + 1) offset = 1;
       var stage = Math.max(0, Math.min(maxStage, Math.round(best.current - offset)));
       return { stage: stage, current: best.current, total: best.total, source: best.source };
     }

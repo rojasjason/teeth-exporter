@@ -27,7 +27,7 @@ FakeGL.prototype = {
   createBuffer() { return {}; }, bindBuffer() {}, bufferData() {}, bufferSubData() {},
   vertexAttribPointer() {}, enableVertexAttribArray() {}, disableVertexAttribArray() {},
   useProgram() {}, bindVertexArray() {}, uniform4f() {}, uniform4fv() {},
-  drawElements() {}, drawArrays() {}, drawRangeElements() {}, getExtension() { return null; }
+  drawElements() {}, drawArrays() {}, drawRangeElements() {}, getExtension() { return null; }, deleteBuffer() {}
 };
 global.HTMLCanvasElement = function () {};
 global.HTMLCanvasElement.prototype.getContext = function () { return new FakeGL(); };
@@ -94,6 +94,36 @@ check("good meshes survive the bad draw", gums.length === 2 && !!scratchMesh);
 check("drawRangeElements draw captured", meshes.some((m) => m.positions.length / 3 === 700));
 check("budget flag reported and false", reply && reply.summary && reply.summary.budgetExceeded === false);
 
+// audit fixes
+// (a) same vertices, new triangle order -> a new draw (connectivity isn't stale)
+const tv = gumVerts(400, false);
+const iA = tris(400), iB = tris(400).reverse();
+draw(tv, iA); draw(tv, iB);
+// (b) interleaved positions at offset 12 in a 24-byte stride: all 3 vertices count
+const inter = new Float32Array(6 * 3);                              // 3 records x (3 pad floats + xyz)
+for (let v = 0; v < 3; v++) inter.set([9, 9, 9, v, v * 2, 0.5], v * 6);
+{ const vb = gl.createBuffer(), ib = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, inter);   // 72 bytes: the 3rd xyz ends exactly at the buffer end
+  gl.vertexAttribPointer(0, 3, FLOAT, false, 24, 12); gl.enableVertexAttribArray(0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2]));
+  gl.drawElements(TRI, 3, U16, 0); }
+// (c) element upload after switching VAOs lands in the bound VAO's index buffer
+const vaoA = {}, vaoB = {};
+{ const vb = gl.createBuffer(), ibA = gl.createBuffer(), ibB = gl.createBuffer();
+  gl.bindVertexArray(vaoA); gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, gumVerts(300, false));
+  gl.vertexAttribPointer(0, 3, FLOAT, false, 0, 0); gl.enableVertexAttribArray(0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibA); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2]));
+  gl.bindVertexArray(vaoB); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibB); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([5, 6, 7]));
+  gl.bindVertexArray(vaoA); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([7, 8, 9]));    // updates A's indices
+  gl.drawElements(TRI, 3, U16, 0); gl.bindVertexArray(null); }
+
+dispatch({ source: "CLINCHECK_WCC_CAPTURE", kind: "gl-snapshot-request", reqId: 44 });
+const r3 = posted.filter((m) => m.kind === "gl-snapshot" && m.reqId === 44).pop();
+const m3 = (r3 && r3.meshes) || [];
+check("same vertices with new triangle order are kept as two draws", m3.filter((m) => m.positions.length / 3 === 400).length === 2);
+check("interleaved positions with an offset keep all 3 vertices", m3.some((m) => m.positions.length === 9 && m.positions[6] === 2 && m.positions[7] === 4));
+check("an index upload after a VAO switch updates the bound VAO", m3.some((m) => m.indices.length === 3 && m.indices[0] === 7 && m.indices[2] === 9));
+
 // latestFrame: after a pause, only the draws of the newest frame come back
 setTimeout(() => {
   draw(gumVerts(900, false), tris(900));                 // the "current frame"
@@ -101,6 +131,21 @@ setTimeout(() => {
   const r2 = posted.filter((m) => m.kind === "gl-snapshot" && m.reqId === 43).pop();
   const counts = ((r2 && r2.meshes) || []).map((m) => m.positions.length / 3);
   check("latestFrame returns only the newest frame's draw", counts.length === 1 && counts[0] === 900);
+  // a second canvas drawing later must not push the first canvas's current frame out
+  setTimeout(() => {
+    const gl2 = new global.HTMLCanvasElement().getContext("webgl2");
+    const vb = gl2.createBuffer(), ib = gl2.createBuffer();
+    gl2.useProgram({}); gl2.bindBuffer(gl2.ARRAY_BUFFER, vb); gl2.bufferData(gl2.ARRAY_BUFFER, gumVerts(30, false));
+    gl2.vertexAttribPointer(0, 3, FLOAT, false, 0, 0); gl2.enableVertexAttribArray(0);
+    gl2.bindBuffer(gl2.ELEMENT_ARRAY_BUFFER, ib); gl2.bufferData(gl2.ELEMENT_ARRAY_BUFFER, tris(30)); gl2.drawElements(TRI, 84, U16, 0);
+    dispatch({ source: "CLINCHECK_WCC_CAPTURE", kind: "gl-snapshot-request", reqId: 45, latestFrame: true });
+    const r5 = posted.filter((m) => m.kind === "gl-snapshot" && m.reqId === 45).pop();
+    const c5 = ((r5 && r5.meshes) || []).map((m) => m.positions.length / 3).sort((x, y) => x - y);
+    check("a second canvas drawing later keeps each canvas's own latest frame", JSON.stringify(c5) === "[30,900]");
+    console.log("\n" + (pass ? "PASS  webgl ripper keeps the right meshes" : "FAIL  webgl ripper"));
+    process.exit(pass ? 0 : 1);
+  }, 400);
+  return;
   console.log("\n" + (pass ? "PASS  webgl ripper keeps the right meshes" : "FAIL  webgl ripper"));
   process.exit(pass ? 0 : 1);
 }, 400);

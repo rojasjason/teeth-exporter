@@ -60,7 +60,11 @@
   }
 
   // sanity bounds on untrusted input (a real ClinCheck tooth is < 2k verts; the bundle ~1.3 MB)
-  var LIMITS = { vc: 5000000, tc: 10000000, zipIn: 96 * 1024 * 1024, entries: 5000, outBytes: 512 * 1024 * 1024 };
+  var LIMITS = { vc: 5000000, tc: 10000000, zipIn: 96 * 1024 * 1024, entries: 5000, outBytes: 512 * 1024 * 1024,
+    maps: 8,                                   // UV / attribute maps per CTM (a tooth has none)
+    ctmAlloc: 256 * 1024 * 1024,               // bytes the CTM reader may allocate for one mesh
+    entryOut: 64 * 1024 * 1024,                // one unzipped file
+    unzipOut: 256 * 1024 * 1024 };             // all unzipped files together (the real bundle is ~3 MB)
   function i32le(b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)); }
 
   // ----------------------------------------------------------------- CTM decode
@@ -68,13 +72,23 @@
   function decodeCTM(bytes) {
     if (!bytes || bytes.length < 36) throw new Error("CTM too small");
     // peek the header counts BEFORE CTM.File allocates buffers from them (reject zip-bomb-style meshes)
-    var vc = i32le(bytes, 12), tc = i32le(bytes, 16);
+    var vc = i32le(bytes, 12), tc = i32le(bytes, 16), uv = i32le(bytes, 20), at = i32le(bytes, 24);
     if (vc < 0 || tc < 0 || vc > LIMITS.vc || tc > LIMITS.tc)
       throw new Error("CTM rejected: implausible counts " + vc + "v/" + tc + "f");
+    if (uv < 0 || at < 0 || uv > LIMITS.maps || at > LIMITS.maps)
+      throw new Error("CTM rejected: implausible map counts " + uv + " uv / " + at + " attr");
+    // the reader allocates one buffer from these counts (indices + verts + normals + maps)
+    var alloc = (tc * 3 + vc * 3 * 2 + vc * 2 * uv + vc * 4 * at) * 4;
+    if (alloc > LIMITS.ctmAlloc) throw new Error("CTM rejected: too large");
     var stream = new CTM.Stream(bytes);
     stream.offset = 0;
     var file = new CTM.File(stream);
-    return { vertices: file.body.vertices, faces: file.body.indices };
+    var V = file.body.vertices, F = file.body.indices;
+    // a truncated or forged file can "decode" into garbage: no NaN vertices, no face past the end
+    for (var k = 0; k < V.length; k++) if (!isFinite(V[k])) throw new Error("CTM rejected: invalid vertex data");
+    var nv = V.length / 3;
+    for (var q = 0; q < F.length; q++) if (F[q] >= nv) throw new Error("CTM rejected: invalid face data");
+    return { vertices: V, faces: F };
   }
 
   // ----------------------------------------------------------------- seating (jaws.json)
@@ -138,6 +152,8 @@
   function stageRange(zipBytes) {
     var files = unzip(zipBytes);
     var teethMeta = readJSON(files, "teeth.json");
+    if (!Array.isArray(teethMeta) || !teethMeta.length) throw new Error("no teeth in WCC bundle");
+    readJSON(files, "jaws.json");                          // a real plan always has its jaw transforms
     var maxAll = 0, maxU = 0, maxL = 0;
     for (var i = 0; i < teethMeta.length; i++) {
       var t = teethMeta[i], arch = archOf(t), mx = 0;
@@ -158,9 +174,22 @@
   // ----------------------------------------------------------------- bundle helpers
   function unzip(zipBytes) {
     if (!zipBytes || zipBytes.length > LIMITS.zipIn) throw new Error("zip too large / missing");
-    var raw = fflate.unzipSync(zipBytes);
-    var keys = Object.keys(raw);
-    if (keys.length > LIMITS.entries) throw new Error("zip has too many entries");
+    // decide per entry BEFORE inflating: only the mesh + JSON files the engine reads, each and all
+    // together under a size cap (a small zip of zeros could otherwise inflate to gigabytes)
+    var seen = 0, total = 0, tooBig = false;
+    var raw = fflate.unzipSync(zipBytes, { filter: function (f) {
+      if (++seen > LIMITS.entries) { tooBig = true; return false; }
+      if (!/\.(ctm|json)$/i.test(f.name)) return false;
+      if (f.originalSize > LIMITS.entryOut || (total += f.originalSize) > LIMITS.unzipOut) { tooBig = true; return false; }
+      return true;
+    } });
+    if (tooBig) throw new Error("zip rejected: too many or too large entries");
+    var keys = Object.keys(raw), actual = 0;
+    // the advertised sizes can lie (a stored entry may claim 1 byte), so check what actually came out
+    for (var j = 0; j < keys.length; j++) {
+      actual += raw[keys[j]].length;
+      if (raw[keys[j]].length > LIMITS.entryOut || actual > LIMITS.unzipOut) throw new Error("zip rejected: too large");
+    }
     var files = {};
     for (var i = 0; i < keys.length; i++) files[keys[i].split("/").pop()] = raw[keys[i]]; // flatten to basenames
     return files;

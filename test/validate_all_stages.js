@@ -73,18 +73,19 @@ global.addEventListener = (t, fn) => { if (t === "message") listeners.push(fn); 
 global.removeEventListener = (t, fn) => { const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1); };
 function deliver(data) { setTimeout(() => listeners.slice().forEach((fn) => fn({ source: global, data })), 1); }
 
-function runFake(firstStage, lastStage, startAt, isCancelled) {
+const flags = {};
+function runFake(firstStage, lastStage, startAt, isCancelled, stuck, onRestore) {
   const viewer = { currentStage: startAt, firstStage, lastStage }, visited = [];
   let epoch = 0;
   global.postMessage = (d) => {
     if (!d || d.source !== TAG) return;
     const reply = (o) => deliver(Object.assign({ source: TAG, token: TOKEN, reqId: d.reqId }, o));
     if (d.kind === "viewer-request") {
-      if (d.op === "setStage") { viewer.currentStage = d.stage; visited.push(d.stage); }
+      if (d.op === "setStage") { if (!stuck) viewer.currentStage = d.stage; visited.push(d.stage); if (onRestore && d.stage === startAt && visited.length > 1) onRestore(); }
       reply({ kind: "viewer-reply", ok: true, info: Object.assign({}, viewer) });
     } else if (d.kind === "gl-mark") reply({ kind: "gl-mark-ack", epoch: ++epoch });
-    else if (d.kind === "gl-stats-request") reply({ kind: "gl-stats", recent: ripped.length });
-    else if (d.kind === "gl-snapshot-request") reply({ kind: "gl-snapshot", meshes: ripped });
+    else if (d.kind === "gl-stats-request") reply({ kind: "gl-stats", recent: ripped.length, created: ripped.length });
+    else if (d.kind === "gl-snapshot-request") { if (d.latestFrame !== true || typeof d.sinceEpoch !== "number") flags.badSnap = true; reply({ kind: "gl-snapshot", meshes: ripped }); }
   };
   delete require.cache[require.resolve("../src/all_stages.js")];
   require("../src/all_stages.js");
@@ -123,6 +124,22 @@ function runFake(firstStage, lastStage, startAt, isCancelled) {
   const can = await runFake(0, 10, 4, () => ++seen > 2);
   check("cancel stops early with 'Export cancelled.' and puts the viewer back on stage 4",
     can.err && /cancelled/i.test(can.err.message) && can.viewer.currentStage === 4 && !can.visited.includes(5));
+
+  check("every rip asked for only the latest frame since the stage change", !flags.badSnap);
+
+  // cancel pressed during the LAST aligner: no zip, viewer back where it was
+  let calls = 0;
+  const late = await runFake(0, 3, 1, () => ++calls > 3);                // checks: before 1, 2, 3, then after the loop
+  check("cancel during the last aligner still cancels (no zip) and restores", late.err && /cancelled/i.test(late.err.message) && late.viewer.currentStage === 1);
+
+  // cancel pressed while the viewer is being moved back: still cancelled, no zip
+  let cancelNow = false;
+  const mid = await runFake(0, 3, 1, () => cancelNow, false, () => { cancelNow = true; });
+  check("cancel during the move back still cancels (no zip)", mid.err && /cancelled/i.test(mid.err.message) && mid.viewer.currentStage === 1);
+
+  // a viewer that ignores setStage: the run stops instead of exporting the wrong stage's gums
+  const st = await runFake(0, 3, 0, null, true);
+  check("a viewer that doesn't move stops the run with a clear error", st.err && /did not move/.test(st.err.message));
 
   console.log("\n" + (pass ? "PASS  every-stage export with real gums" : "FAIL  every-stage export"));
   process.exit(pass ? 0 : 1);

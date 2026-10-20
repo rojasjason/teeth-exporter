@@ -13,18 +13,19 @@
  *
  * Shared by content.js (extension, ISOLATED world) and userscript_orchestrator.js (one context).
  * Exposes globalThis.TeethAllStages(opts) -> Promise<{ chunks, stageCount, firstStage, lastStage,
- *   steps:[{stage, arches}], missing:[stage], restored }>
- *   opts: { tag, origin, tokens, engine, fflate, bytes, onProgress({done,total,stage}) }
+ *   steps:[{aligner, stage, arches}], missing:[aligner], restored, budgetHit }>
+ *   opts: { tag, origin, tokens, engine, fflate, bytes, onProgress({done,total,stage,aligner}), isCancelled() }
+ * and globalThis.TeethRipStage(opts, stage) -> Promise<{ meshes, restored }>: show one stage, rip
+ *   its frame, put the viewer back (used when "Export this aligner" targets another aligner).
  */
 (function (root) {
   "use strict";
 
   var MAX_ZIP = 2 * 1024 * 1024 * 1024;    // refuse to build more than 2 GB of compressed output
 
-  function TeethAllStages(opts) {
-    var TAG = opts.tag, ORIGIN = opts.origin, tokens = opts.tokens, engine = opts.engine, ff = opts.fflate;
-    var onProgress = opts.onProgress || function () {};
-    var isCancelled = opts.isCancelled || function () { return false; };
+  // the shared machinery: message round trips, waiting for a stage to draw, ripping one stage
+  function makeRig(opts) {
+    var TAG = opts.tag, ORIGIN = opts.origin, tokens = opts.tokens;
     var seq = 0;
 
     function sleep(ms) { return new Promise(function (r) { root.setTimeout(r, ms); }); }
@@ -49,37 +50,70 @@
     }
     function viewer(op, stage) { return request({ kind: "viewer-request", op: op, stage: stage }, "viewer-reply", 6000); }
 
-    // wait until the set of draws seen since `epoch` stops growing (the new gum is drawn a frame
-    // or two after the stage change). Returns the count seen.
+    // wait until the draws seen AND first created since `epoch` both stop changing (the new gum is
+    // drawn a frame or two after the stage change; measured live at under 150 ms). Returns the count.
     async function settle(epoch) {
-      var t0 = Date.now(), lastN = -1, same = 0, n = 0;
+      var t0 = Date.now(), last = "", same = 0, n = 0;
       await sleep(350);
       while (Date.now() - t0 < 7000) {
         var st = await request({ kind: "gl-stats-request", sinceEpoch: epoch }, "gl-stats", 1500);
         n = st ? st.recent : 0;
-        if (n > 0 && n === lastN) { if (++same >= 2 && Date.now() - t0 >= 800) return n; }
+        var made = st ? st.created : 0, key = n + ":" + made;
+        // stable, and either something new was drawn for this stage or long enough has passed that
+        // this stage simply looks like the last one (an arch that didn't move between aligners)
+        if (n > 0 && key === last) { if (++same >= 2 && Date.now() - t0 >= 800 && (made > 0 || Date.now() - t0 >= 1500)) return n; }
         else same = 0;
-        lastN = n;
+        last = key;
         await sleep(250);
       }
       return n;
     }
 
+    // show stage s and rip ONLY the latest frame drawn after the change: an older stage's gum that
+    // happens to be redrawn (orbiting) between the mark and the change can't sneak in
     async function ripStage(s) {
       var mk = await request({ kind: "gl-mark" }, "gl-mark-ack", 2000);
       if (!mk) throw new Error("the 3D capture is not responding; reload the viewer page");
       var r = await viewer("setStage", s);
       if (!r || !r.ok) throw new Error("could not move the viewer to stage " + s + (r && r.error ? ": " + r.error : ""));
+      if (!r.info || r.info.currentStage !== s) throw new Error("the viewer did not move to stage " + s);
       var n = await settle(mk.epoch);
-      if (!n) return [];
-      var snap = await request({ kind: "gl-snapshot-request", sinceEpoch: mk.epoch }, "gl-snapshot", 15000);
-      return (snap && snap.meshes) || [];
+      if (!n) return { meshes: [], budgetHit: false, summary: null, timedOut: false };
+      var snap = await request({ kind: "gl-snapshot-request", sinceEpoch: mk.epoch, latestFrame: true }, "gl-snapshot", 15000);
+      var clean = opts.clean || function (m) { return Array.isArray(m) ? m : []; };
+      return { meshes: clean(snap && snap.meshes), budgetHit: !!(snap && snap.summary && snap.summary.budgetExceeded),
+        summary: (snap && snap.summary) || null, timedOut: !snap };
     }
+
+    return { request: request, viewer: viewer, ripStage: ripStage, sleep: sleep };
+  }
+
+  // one stage, then put the viewer back where it was
+  async function TeethRipStage(opts, stage) {
+    var rig = makeRig(opts);
+    var info = await rig.viewer("info");
+    if (!info || !info.ok || !info.info) throw new Error("can't reach the viewer's step controls on this page");
+    var original = info.info.currentStage, restored = true, after = info.info, got, err = null;
+    try { got = await rig.ripStage(stage); } catch (e) { err = e; }
+    if (original !== stage) {
+      var back = await rig.viewer("setStage", original);
+      restored = !!(back && back.ok && back.info && back.info.currentStage === original);
+      if (back && back.info) after = back.info;
+    }
+    if (err) { if (!restored) err.message += " The viewer couldn't be moved back: set the slider to your aligner again."; throw err; }
+    return { meshes: got.meshes, restored: restored, summary: got.summary, timedOut: got.timedOut, budgetHit: got.budgetHit, viewer: after };
+  }
+
+  function TeethAllStages(opts) {
+    var engine = opts.engine, ff = opts.fflate;
+    var onProgress = opts.onProgress || function () {};
+    var isCancelled = opts.isCancelled || function () { return false; };
+    var rig = makeRig(opts), viewer = rig.viewer;
 
     return (async function () {
       var info = await viewer("info");
       if (!info || !info.ok || !info.info) throw new Error("can't reach the viewer's step controls on this page");
-      // Match the viewer's "Aligner Number N / T" slider one to one. Verified live 2026-10-19:
+      // Match the viewer's "Aligner Number N / T" slider one to one. On the live viewer:
       // aligner N = stage firstStage + N - 1, T = lastStage, and the slider stops at stage lastStage - 1
       // (the final stage in the data is never shown). So export aligners 1..T, named by aligner number.
       var first = info.info.firstStage, last = info.info.lastStage, original = info.info.currentStage;
@@ -98,15 +132,17 @@
         if (zipBytes > MAX_ZIP) throw new Error("export too large");
       }
 
-      var steps = [], missing = [], manifest = null, restored = false;
+      var steps = [], missing = [], manifest = null, restored = false, budgetHit = false, failure = null;
       try {
         // the viewer only redraws on a change: if it already shows the first stage, step away first
         if (original === first && lastShown > first) await viewer("setStage", first + 1);
+        if (original === first && lastShown === first) await viewer("setStage", Math.min(last, first + 1));
         for (var s = first; s <= lastShown; s++) {
           var aligner = s - first + 1;
           if (isCancelled()) throw new Error("Export cancelled.");
           onProgress({ done: aligner - 1, total: total, stage: s, aligner: aligner });
-          var meshes = await ripStage(s);
+          var got = await rig.ripStage(s), meshes = got.meshes;
+          if (got.budgetHit) budgetHit = true;
           var res = engine.exportFromBundle(opts.bytes, { stage: s, glb: true, glMeshes: meshes });
           var arches = ((res.gumInfo && res.gumInfo.gums) || []).map(function (g) { return g.arch; });
           if (arches.length < 2) missing.push(aligner);
@@ -116,9 +152,14 @@
           for (var path in laid) addFile(path, laid[path]);
           res = null; laid = null; meshes = null;     // let this stage's raw files go
         }
+        if (isCancelled()) throw new Error("Export cancelled.");     // a cancel during the last aligner counts too
         onProgress({ done: total, total: total, stage: lastShown, aligner: total });
-      } finally {
-        try { var back = await viewer("setStage", original); restored = !!(back && back.ok); } catch (e) {}
+      } catch (e) { failure = e; }
+      try { var back = await viewer("setStage", original); restored = !!(back && back.ok && back.info && back.info.currentStage === original); } catch (e) {}
+      if (!failure && isCancelled()) failure = new Error("Export cancelled.");   // cancelled while the viewer was moving back
+      if (failure) {
+        if (!restored) failure.message += " The viewer couldn't be moved back: set the slider to your aligner again.";
+        throw failure;
       }
 
       var readme = [
@@ -135,6 +176,7 @@
         missing.length
           ? "Gum not captured for aligner(s) " + missing.join(", ") + ": those folders use teeth-only files at the top for the missing arch."
           : "Both gums captured for every aligner.",
+        budgetHit ? "NOTE: the capture memory limit was reached during this run, which is why some gums are missing. Reload the viewer page and run it again." : "",
         "",
         "manifest.json              per-tooth arch / UNS number / width (mm)",
         "Teeth are an exact extraction. Gums are the viewer's own generated surface for each stage."
@@ -143,9 +185,10 @@
       addFile("manifest.json", new TextEncoder().encode(JSON.stringify({ alignerCount: total, stages: steps, teeth: manifest }, null, 2)));
       zip.end();
       if (zipErr) throw zipErr;
-      return { chunks: chunks, bytes: zipBytes, stageCount: total, firstStage: first, lastStage: last, steps: steps, missing: missing, restored: restored };
+      return { chunks: chunks, bytes: zipBytes, stageCount: total, firstStage: first, lastStage: last, steps: steps, missing: missing, restored: restored, budgetHit: budgetHit, original: original };
     })();
   }
 
   root.TeethAllStages = TeethAllStages;
+  root.TeethRipStage = TeethRipStage;
 })(typeof globalThis !== "undefined" ? globalThis : this);

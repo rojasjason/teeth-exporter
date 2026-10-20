@@ -14,6 +14,7 @@ Everything runs in your browser. Nothing is uploaded anywhere.
 ## Install
 
 There are two ways to install. Both give you the same panel and the same exports.
+**Install one, not both.** With both, two copies run on the same viewer.
 
 ### Option 1: Tampermonkey (easiest, no Developer Mode)
 
@@ -77,11 +78,13 @@ The STL files print at true size. The GLB opens at true size in Blender and othe
 
 ### Advanced
 
-- **Aligner number:** export a specific aligner instead of the one on screen.
+- **Aligner number:** export a specific aligner instead of the one on screen. The viewer
+  briefly moves to that aligner to capture its gums, then moves back.
 - **Download raw scan:** the original scan file from the viewer, untouched. Useful as a backup
   and for bug reports.
-- **Troubleshooting:** download the files the viewer loaded, or what is on screen as a 3D file.
-  Case IDs and private links are removed from these files.
+- **Troubleshooting:** download the files the viewer loaded (your scan itself is left out),
+  or what is on screen as a 3D file. Case IDs and private links are removed from the file list.
+  The raw scan does contain your treatment-plan identifiers, so don't post it publicly.
 
 ---
 
@@ -93,8 +96,8 @@ The viewer loads your whole 3D model as one compressed file (a ZIP of
 1. **Captures** that file as the viewer loads it, by watching the page's own network requests.
 2. **Decodes** the tooth meshes (OpenCTM MG2 + LZMA) in the page.
 3. **Places** both jaws in their real bite, using the plan's own jaw data, at any aligner.
-4. **Captures the real gums.** The viewer never downloads a gum mesh. It generates the gums and
-   sends them to the graphics card to draw. Teeth Exporter reads them at that point, the exact
+4. **Captures the real gums.** The gum you see is generated, not downloaded: the viewer builds
+   it for each aligner and sends it to the graphics card to draw. Teeth Exporter reads them at that point, the exact
    surface the viewer shows, and fits them onto the teeth. The captured teeth come back
    identical to the downloaded ones, which proves both use the same coordinates.
 5. For **every aligner**, it moves the viewer to each aligner in turn, captures that aligner's
@@ -139,6 +142,7 @@ node test/validate_stage_probe.js    reading the aligner from page text
 node test/validate_webgl_capture.js  the gum capture keeps the right meshes
 node test/validate_all_stages.js     the every-aligner loop, folders, and Cancel
 node test/validate_userscript.js     the Tampermonkey build loads and exports
+node test/validate_hardening.js      message lock, zip and mesh size limits, scan never in captured files
 ```
 
 The parity tests read a real scan from a private folder that is not part of this repository.
@@ -149,7 +153,8 @@ Point the `DATA` path in a test at any extracted scan to run them.
 ## Troubleshooting
 
 - **The panel never says the scan is ready.** Your viewer may be on a website that isn't listed
-  yet. Open an issue with the website's address (no private links, please).
+  yet. Open an issue with the website's address (no private links, please). Never attach your
+  raw scan to a public issue.
 - **No gums in the export.** That jaw wasn't drawn yet. Rotate the model so both gums show,
   then export again.
 - **"Export every aligner" missed some gums.** The tab was probably hidden while it ran. Keep

@@ -14,7 +14,7 @@ const path = require("path");
 const ROOT = path.resolve(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.json"), "utf8"));
 const VERSION = manifest.version || "0.1.0";
-const REPO = "https://github.com/rojasjason/teeth-exporter";          // updated at launch
+const REPO = "https://github.com/rojasjason/teeth-exporter";
 const RAW = "https://raw.githubusercontent.com/rojasjason/teeth-exporter/main/dist/teeth-exporter.user.js";
 
 // domains the extension matches → @match lines
