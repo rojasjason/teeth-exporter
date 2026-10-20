@@ -1,4 +1,4 @@
-# Teeth Exporter (unofficial)
+# Teeth Exporter
 
 Download your own teeth and gums as 3D files (STL and GLB) from your aligner treatment plan's
 3D viewer. Works with the Invisalign ClinCheck viewer. One aligner or every aligner at once.

@@ -53,7 +53,6 @@
       ".te-logo{width:30px;height:30px;flex:none;border-radius:10px;background:var(--primary);display:grid;place-items:center;}",
       ".te-logo svg{width:18px;height:18px;color:var(--primary-ink);}",
       ".te-title{font:700 15px/1.2 var(--sans);margin:0;color:var(--ink);flex:1;}",
-      ".te-tag{font:600 10px/1 var(--sans);color:var(--ink-3);background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:4px 8px;}",
       ".te-status{display:flex;align-items:center;padding:12px 16px 0;}",
       ".te-pill{display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border-radius:999px;background:var(--soft);",
       "font:600 12px/1 var(--sans);color:var(--ink-2);transition:background-color 250ms var(--ease),color 250ms var(--ease);}",
@@ -167,7 +166,6 @@
     var logo = toothLogo();
     head.appendChild(logo);
     head.appendChild(el("h1", "te-title", "Teeth Exporter"));
-    head.appendChild(el("span", "te-tag", "Unofficial"));
 
     var status = el("div", "te-status"); status.setAttribute("data-state", "waiting");
     var pill = el("span", "te-pill");

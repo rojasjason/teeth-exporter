@@ -232,7 +232,7 @@
           var gums = (res.gumInfo && res.gumInfo.gums) || [];
           var arches = gums.map(function (g) { return g.arch; });
           var lines = [
-            "Teeth Exporter (unofficial)",
+            "Teeth Exporter",
             "Aligner Number " + alignerOf(stage) + "  |  units: millimeters, true scale", "",
             gums.length
               ? "Real gums included: " + arches.join(" + ") + "   (fit: " + gums.map(function (g) { return g.arch + " " + g.cost + "mm"; }).join(", ") + ")"

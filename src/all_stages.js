@@ -163,7 +163,7 @@
       }
 
       var readme = [
-        "Teeth Exporter (unofficial)",
+        "Teeth Exporter",
         "Every aligner with its real gums: " + total + " stages, numbered like the viewer's \"Aligner Number\" slider.",
         "stage_01 = Aligner Number 1 (start of the plan) ... stage_" + String(total).padStart(2, "0") + " = Aligner Number " + total + ".",
         "units: millimeters, true scale", "",

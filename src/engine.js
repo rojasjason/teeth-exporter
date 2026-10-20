@@ -282,7 +282,7 @@
     if (nTri < 0 || 84 + nTri * 50 > LIMITS.outBytes) throw new Error("mesh too large for STL");
     var buf = new ArrayBuffer(84 + nTri * 50);
     var dv = new DataView(buf);
-    var head = "Teeth Exporter (unofficial) " + (header || "");
+    var head = "Teeth Exporter " + (header || "");
     for (var h = 0; h < 80; h++) dv.setUint8(h, h < head.length ? head.charCodeAt(h) & 0x7f : 0);
     dv.setUint32(80, nTri, true);
     var off = 84;
@@ -312,7 +312,7 @@
   function buildGLB(objects, opts) {
     var unitScale = opts && opts.unitScale;
     var json = {
-      asset: { version: "2.0", generator: "Teeth Exporter (unofficial)" },
+      asset: { version: "2.0", generator: "Teeth Exporter" },
       scene: 0, scenes: [{ nodes: [] }], nodes: [],
       meshes: [], materials: [], accessors: [], bufferViews: [], buffers: []
     };
