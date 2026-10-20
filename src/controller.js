@@ -1,8 +1,7 @@
 /*
- * controller.js — everything the tool DOES, shared by both builds.
+ * controller.js — everything the tool DOES.
  *
- * The extension (content.js, ISOLATED world) and the userscript (userscript_orchestrator.js, one
- * page context) both create one controller, so a button behaves identically in either. It:
+ * content.js (ISOLATED world) creates one controller. It:
  *   - collects the token handshake, the WCC bundle, viewer stage pushes and WebGL snapshots from
  *     capture.js / webgl_capture.js / viewer_bridge.js (same-window postMessage, token-checked),
  *   - tracks the current aligner (viewer state first, DOM label probe as fallback),

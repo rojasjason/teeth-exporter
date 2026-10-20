@@ -13,29 +13,46 @@ Everything runs in your browser. Nothing is uploaded anywhere.
 
 ## Install
 
-There are two ways to install. Both give you the same panel and the same exports.
-**Install one, not both.** With both, two copies run on the same viewer.
+Teeth Exporter is a Chrome extension. It is not in the Chrome Web Store, so you add it yourself.
+It takes about two minutes. It works in Chrome, Edge, Brave, and other Chromium browsers
+(version 111 or newer).
 
-### Option 1: Tampermonkey (easiest, no Developer Mode)
+### 1. Download it
 
-1. Install **Tampermonkey**, a free browser add-on:
-   [Chrome / Edge / Brave](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo) ·
-   [Firefox](https://addons.mozilla.org/firefox/addon/tampermonkey/)
-2. Open the script:
-   [`teeth-exporter.user.js`](https://raw.githubusercontent.com/rojasjason/teeth-exporter/main/dist/teeth-exporter.user.js)
-3. Tampermonkey shows an install page. Click **Install**.
+1. At the top of this page, click the green **Code** button.
+2. Click **Download ZIP**.
+3. Unzip the file. You get a folder named `teeth-exporter-main`.
+4. Move that folder somewhere it can stay, for example your Documents folder.
+   The browser loads the extension from this folder. If you move or delete the folder later,
+   the extension stops working.
 
-The script runs only on Invisalign and ClinCheck viewer pages, and Tampermonkey keeps it
-up to date for you.
+### 2. Add it to your browser
 
-### Option 2: Chrome extension (load unpacked)
+1. Open a new tab and go to `chrome://extensions`.
+   (Edge: `edge://extensions`. Brave: `brave://extensions`.)
+2. Turn on **Developer mode**. The switch is in the top-right corner.
+   (In Edge, it is in the left sidebar.)
+3. Click **Load unpacked**. The button appears after you turn on Developer mode.
+4. Select the `teeth-exporter-main` folder (the one that holds `manifest.json`), then click
+   **Select**.
+5. **Teeth Exporter** now shows in your list of extensions.
 
-1. Download this repository (**Code → Download ZIP**) and unzip it.
-2. Open `chrome://extensions` in Chrome, Edge, Brave, or another Chromium browser (version 111+).
-3. Turn on **Developer mode** (top right).
-4. Click **Load unpacked** and choose the unzipped folder.
+### 3. Pin the icon
 
-There is no build step.
+1. Click the puzzle-piece icon in the browser toolbar.
+2. Click the pin next to **Teeth Exporter**.
+
+The mint tooth icon now stays in your toolbar.
+
+### Update to a new version
+
+1. Download the ZIP again and unzip it.
+2. Replace the old `teeth-exporter-main` folder with the new one.
+3. Go to `chrome://extensions` and click the reload arrow on **Teeth Exporter**.
+
+### Remove it
+
+Go to `chrome://extensions` and click **Remove** on **Teeth Exporter**. Then delete the folder.
 
 ---
 
@@ -45,8 +62,7 @@ There is no build step.
    you on `my.invisalign.com`) and let the 3D model load.
 2. **Rotate the model once** so the pink gums on both jaws show on screen. The gums are created
    only when the viewer draws them, so this is what lets them be captured.
-3. Open the Teeth Exporter panel. With the extension, click the tooth icon in your toolbar. With
-   Tampermonkey, the panel appears in the bottom-right corner of the viewer.
+3. Click the tooth icon in your toolbar to open the Teeth Exporter panel.
 4. Click one of the two buttons:
    - **Export this aligner** saves the aligner on screen, teeth and real gums.
    - **Export every aligner** steps through your whole plan and saves every aligner, each with
@@ -114,23 +130,21 @@ manifest.json            extension manifest (MV3)
 src/capture.js           captures the scan file (page context)
 src/webgl_capture.js     captures the drawn gums (page context)
 src/viewer_bridge.js     reads and sets the viewer's aligner (page context)
-src/controller.js        everything the buttons do (shared by both builds)
-src/ui_panel.js          the panel and the progress screen (shared by both builds)
+src/controller.js        everything the buttons do
+src/ui_panel.js          the panel and the progress screen
 src/all_stages.js        the every-aligner loop
 src/engine.js            decode, place, fit gums, write STL/GLB/zip
 src/stage_probe.js       fallback: reads the aligner from the page text
-src/content.js           extension glue
+src/content.js           connects the page scripts to the panel
 src/popup.*              extension popup
 src/background.js        toolbar badge
-src/userscript_orchestrator.js  Tampermonkey glue
 lib/                     OpenCTM decoder + fflate (vendored, MIT)
-build/build_userscript.js  builds dist/teeth-exporter.user.js from src/ + lib/
 icons/src/icon.svg       source of the toolbar icon
 test/                    offline test suites
 ```
 
-`src/` is the single source for both builds. After a change, run
-`node build/build_userscript.js` to rebuild the Tampermonkey script. No dependencies.
+There is no build step and there are no dependencies. Edit `src/`, then click the reload arrow
+on `chrome://extensions`.
 
 ### Tests
 
@@ -141,7 +155,6 @@ node test/validate_gum_variants.js   the right gum is picked per jaw when there 
 node test/validate_stage_probe.js    reading the aligner from page text
 node test/validate_webgl_capture.js  the gum capture keeps the right meshes
 node test/validate_all_stages.js     the every-aligner loop, folders, and Cancel
-node test/validate_userscript.js     the Tampermonkey build loads and exports
 node test/validate_hardening.js      message lock, zip and mesh size limits, scan never in captured files
 ```
 
@@ -166,7 +179,7 @@ Point the `DATA` path in a test at any extracted scan to run them.
 ## Roadmap
 
 - Attachments export (the planned bumps are in the scan file)
-- Firefox extension build
+- Firefox version
 - 3D preview in the panel
 
 ---

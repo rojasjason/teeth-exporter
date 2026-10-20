@@ -11,7 +11,7 @@
  * (a long plan never holds every stage's raw STLs at once). The viewer is put back on the stage
  * the user was on.
  *
- * Shared by content.js (extension, ISOLATED world) and userscript_orchestrator.js (one context).
+ * Used by content.js (ISOLATED world).
  * Exposes globalThis.TeethAllStages(opts) -> Promise<{ chunks, stageCount, firstStage, lastStage,
  *   steps:[{aligner, stage, arches}], missing:[aligner], restored, budgetHit }>
  *   opts: { tag, origin, tokens, engine, fflate, bytes, onProgress({done,total,stage,aligner}), isCancelled() }

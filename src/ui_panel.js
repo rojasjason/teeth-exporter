@@ -1,10 +1,8 @@
 /*
- * ui_panel.js — the ONE panel both builds show. The extension popup and the userscript's floating
- * panel both call TeethPanel, so they look and behave the same; only the adapter differs (the popup
- * messages the tab, the userscript calls its controller directly).
+ * ui_panel.js — the panel the extension popup shows. The adapter messages the tab's controller.
  *
  * Styles go in through a constructable stylesheet (adoptedStyleSheets), which a strict page CSP
- * can't strip, so the floating panel looks right on any viewer page. Design: Workshop Standard
+ * can't strip. Design: Workshop Standard
  * (mono base, mono uppercase labels, 1px rules, square corners, no shadows, light + dark).
  *
  * Exposes globalThis.TeethPanel({ mount, adapter, mode }) -> { refresh() }

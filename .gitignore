@@ -2,8 +2,5 @@ test/out/
 node_modules/
 *.tgz
 .DS_Store
-# generated beta hand-off package (regenerate: node build/make_beta_package.js)
-dist/teeth-exporter-beta/
-dist/teeth-exporter-beta.zip
 # internal working doc — resume state, not for the public repo
 HANDOFF.md

@@ -10,7 +10,7 @@
   "use strict";
   function send(m) { try { chrome.runtime.sendMessage(m); } catch (e) {} }
 
-  var overlay = globalThis.TeethProgress ? globalThis.TeethProgress() : null;   // shared with the userscript
+  var overlay = globalThis.TeethProgress ? globalThis.TeethProgress() : null;
   var ctl = globalThis.TeethController({
     onCapture: function (st) { send({ type: "wcc-captured", size: st.size }); },
     onStep: function (i) { send({ type: "stage-step", step: i.aligner, total: i.total }); },
