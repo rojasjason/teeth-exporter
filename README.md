@@ -1,0 +1,194 @@
+# Teeth Exporter (unofficial)
+
+Download your own teeth and gums as 3D files (STL and GLB) from your aligner treatment plan's
+3D viewer. Works with the Invisalign ClinCheck viewer. One aligner or every aligner at once.
+
+Everything runs in your browser. Nothing is uploaded anywhere.
+
+> **Unofficial.** Not affiliated with, authorized by, or endorsed by Align Technology,
+> Invisalign, or ClinCheck. Use it only on **your own** treatment plan.
+> See [Legal](#legal).
+
+---
+
+## Install
+
+There are two ways to install. Both give you the same panel and the same exports.
+
+### Option 1: Tampermonkey (easiest, no Developer Mode)
+
+1. Install **Tampermonkey**, a free browser add-on:
+   [Chrome / Edge / Brave](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo) ·
+   [Firefox](https://addons.mozilla.org/firefox/addon/tampermonkey/)
+2. Open the script:
+   [`teeth-exporter.user.js`](https://raw.githubusercontent.com/rojasjason/teeth-exporter/main/dist/teeth-exporter.user.js)
+3. Tampermonkey shows an install page. Click **Install**.
+
+The script runs only on Invisalign and ClinCheck viewer pages, and Tampermonkey keeps it
+up to date for you.
+
+### Option 2: Chrome extension (load unpacked)
+
+1. Download this repository (**Code → Download ZIP**) and unzip it.
+2. Open `chrome://extensions` in Chrome, Edge, Brave, or another Chromium browser (version 111+).
+3. Turn on **Developer mode** (top right).
+4. Click **Load unpacked** and choose the unzipped folder.
+
+There is no build step.
+
+---
+
+## Use
+
+1. Open your **ClinCheck / Invisalign 3D viewer** (for example, the treatment plan shared with
+   you on `my.invisalign.com`) and let the 3D model load.
+2. **Rotate the model once** so the pink gums on both jaws show on screen. The gums are created
+   only when the viewer draws them, so this is what lets them be captured.
+3. Open the Teeth Exporter panel. With the extension, click the tooth icon in your toolbar. With
+   Tampermonkey, the panel appears in the bottom-right corner of the viewer.
+4. Click one of the two buttons:
+   - **Export this aligner** saves the aligner on screen, teeth and real gums.
+   - **Export every aligner** steps through your whole plan and saves every aligner, each with
+     its own real gums. A progress screen shows which aligner it is on. It takes about a second
+     per aligner. Keep the tab open and on screen while it runs.
+
+Aligner numbers match the viewer's **Aligner Number** slider: the folder `stage_05` is
+Aligner Number 5.
+
+### What you get
+
+Each export is a `.zip`. Each aligner looks like this (true scale, millimeters):
+
+```
+full_mouth_with_gums.stl   both jaws, teeth + gums
+upper_with_gums.stl        upper teeth + gum
+lower_with_gums.stl        lower teeth + gum
+full_mouth.glb             colored 3D model; upper teeth, lower teeth, and each gum are separate objects
+Advanced/
+  full_mouth_teeth.stl, upper_teeth.stl, lower_teeth.stl    teeth only
+  full_mouth_gums.stl, gum_U.stl, gum_L.stl                 gums only
+```
+
+"Export every aligner" gives one of these folders per aligner (`stage_01`, `stage_02`, ...)
+plus a README and a manifest. "Export this aligner" also puts its manifest and README in
+`Advanced/`.
+
+The STL files print at true size. The GLB opens at true size in Blender and other 3D apps.
+
+### Advanced
+
+- **Aligner number:** export a specific aligner instead of the one on screen.
+- **Download raw scan:** the original scan file from the viewer, untouched. Useful as a backup
+  and for bug reports.
+- **Troubleshooting:** download the files the viewer loaded, or what is on screen as a 3D file.
+  Case IDs and private links are removed from these files.
+
+---
+
+## How it works
+
+The viewer loads your whole 3D model as one compressed file (a ZIP of
+[OpenCTM](http://openctm.sourceforge.net/) meshes plus JSON data). Teeth Exporter:
+
+1. **Captures** that file as the viewer loads it, by watching the page's own network requests.
+2. **Decodes** the tooth meshes (OpenCTM MG2 + LZMA) in the page.
+3. **Places** both jaws in their real bite, using the plan's own jaw data, at any aligner.
+4. **Captures the real gums.** The viewer never downloads a gum mesh. It generates the gums and
+   sends them to the graphics card to draw. Teeth Exporter reads them at that point, the exact
+   surface the viewer shows, and fits them onto the teeth. The captured teeth come back
+   identical to the downloaded ones, which proves both use the same coordinates.
+5. For **every aligner**, it moves the viewer to each aligner in turn, captures that aligner's
+   gums, and puts the viewer back where you had it.
+6. **Saves** STL and GLB files into one `.zip`.
+
+The scan stays in the tab's memory and goes straight to your downloads. Teeth Exporter makes
+no network requests of its own.
+
+### Code
+
+```
+manifest.json            extension manifest (MV3)
+src/capture.js           captures the scan file (page context)
+src/webgl_capture.js     captures the drawn gums (page context)
+src/viewer_bridge.js     reads and sets the viewer's aligner (page context)
+src/controller.js        everything the buttons do (shared by both builds)
+src/ui_panel.js          the panel and the progress screen (shared by both builds)
+src/all_stages.js        the every-aligner loop
+src/engine.js            decode, place, fit gums, write STL/GLB/zip
+src/stage_probe.js       fallback: reads the aligner from the page text
+src/content.js           extension glue
+src/popup.*              extension popup
+src/background.js        toolbar badge
+src/userscript_orchestrator.js  Tampermonkey glue
+lib/                     OpenCTM decoder + fflate (vendored, MIT)
+build/build_userscript.js  builds dist/teeth-exporter.user.js from src/ + lib/
+icons/src/icon.svg       source of the toolbar icon
+test/                    offline test suites
+```
+
+`src/` is the single source for both builds. After a change, run
+`node build/build_userscript.js` to rebuild the Tampermonkey script. No dependencies.
+
+### Tests
+
+```
+node test/validate.js                teeth match the reference pipeline within 0.01 mm
+node test/validate_gums.js           gum fitting matches the reference exactly
+node test/validate_gum_variants.js   the right gum is picked per jaw when there are several
+node test/validate_stage_probe.js    reading the aligner from page text
+node test/validate_webgl_capture.js  the gum capture keeps the right meshes
+node test/validate_all_stages.js     the every-aligner loop, folders, and Cancel
+node test/validate_userscript.js     the Tampermonkey build loads and exports
+```
+
+The parity tests read a real scan from a private folder that is not part of this repository.
+Point the `DATA` path in a test at any extracted scan to run them.
+
+---
+
+## Troubleshooting
+
+- **The panel never says the scan is ready.** Your viewer may be on a website that isn't listed
+  yet. Open an issue with the website's address (no private links, please).
+- **No gums in the export.** That jaw wasn't drawn yet. Rotate the model so both gums show,
+  then export again.
+- **"Export every aligner" missed some gums.** The tab was probably hidden while it ran. Keep
+  the tab open and on screen, then run it again.
+- **"Can't reach the viewer."** Reload the viewer page, let it load, then try again.
+
+---
+
+## Roadmap
+
+- Attachments export (the planned bumps are in the scan file)
+- Firefox extension build
+- 3D preview in the panel
+
+---
+
+## Legal
+
+- **Your data only.** Export treatment plans that are yours, or that you are authorized to
+  access.
+- **No affiliation.** "Invisalign", "ClinCheck", and "Align Technology" are trademarks of
+  Align Technology, Inc. This project is independent and unofficial.
+- Teeth Exporter only reads a model file your own browser already downloaded to show it, using
+  open-source decoders.
+- Provided **as is**, without warranty. Not a medical device. Exported models are for personal,
+  educational, and hobby use, not for clinical decisions.
+
+## Credits
+
+- OpenCTM JavaScript reader `ctm.js` + `lzma.js`, © Juan Mellado, MIT
+- [fflate](https://github.com/101arrowz/fflate), © Arjun Barrett, MIT
+- OpenCTM format, Marcus Geelnard
+
+See [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## License
+
+This project's own code is licensed
+**[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)**: free to use, share,
+and change for **non-commercial** purposes, with credit, and changed versions must use the same
+license. No selling. Full text in [LICENSE](LICENSE). The libraries in `lib/` keep their MIT
+licenses ([THIRD_PARTY.md](THIRD_PARTY.md)).
