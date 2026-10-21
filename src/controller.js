@@ -111,10 +111,13 @@
 
     // ---- messages from our MAIN-world scripts ----
     root.addEventListener("message", function (ev) {
-      if (ev.source !== root) return;
+      if (ev.source !== (root.window || root)) return;            // Firefox: globalThis is the script sandbox, not the window
       if (ev.origin !== location.origin && ev.origin !== "null") return;
       var d = ev.data;
       if (!d || d.source !== TAG) return;
+      // Firefox hands content scripts the page's own objects, so "instanceof ArrayBuffer" fails on
+      // them. Copy the message into this script's world first (cloneInto exists only in Firefox).
+      if (typeof cloneInto === "function") { try { d = structuredClone(d); } catch (e) { return; } }
       // Our three MAIN-world scripts (capture, webgl_capture, viewer_bridge) each post one hello at
       // document_start, before page code runs, so the first three are ours. After that, or once real
       // traffic starts, no new token is accepted. This stops a page script from registering its own.

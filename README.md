@@ -13,46 +13,79 @@ Everything runs in your browser. Nothing is uploaded anywhere.
 
 ## Install
 
-Teeth Exporter is a Chrome extension. It is not in the Chrome Web Store, so you add it yourself.
-It takes about two minutes. It works in Chrome, Edge, Brave, and other Chromium browsers
-(version 111 or newer).
+It is not in an extension store, so you add it yourself. It takes about two minutes.
 
-### 1. Download it
+**Pick your browser, then click its download:**
 
-1. At the top of this page, click the green **Code** button.
-2. Click **Download ZIP**.
-3. Unzip the file. You get a folder named `teeth-exporter-main`.
-4. Move that folder somewhere it can stay, for example your Documents folder.
+| Your browser | Download | Then follow |
+|---|---|---|
+| Chrome, Edge, Brave, or another Chromium browser | [**teeth-exporter-chrome-edge-brave.zip**](https://github.com/rojasjason/teeth-exporter/releases/latest/download/teeth-exporter-chrome-edge-brave.zip) | [Chrome, Edge, Brave steps](#chrome-edge-brave) |
+| Firefox | [**teeth-exporter-firefox.zip**](https://github.com/rojasjason/teeth-exporter/releases/latest/download/teeth-exporter-firefox.zip) | [Firefox steps](#firefox) |
+
+Safari is not supported.
+
+All downloads are also on the [Releases page](https://github.com/rojasjason/teeth-exporter/releases/latest).
+
+### Chrome, Edge, Brave
+
+Needs Chrome 111 or newer (or the same version of Edge or Brave).
+
+**1. Unzip it**
+
+1. Unzip `teeth-exporter-chrome-edge-brave.zip`. You get a folder with the same name.
+2. Move that folder somewhere it can stay, for example your Documents folder.
    The browser loads the extension from this folder. If you move or delete the folder later,
    the extension stops working.
 
-### 2. Add it to your browser
+**2. Add it to your browser**
 
 1. Open a new tab and go to `chrome://extensions`.
    (Edge: `edge://extensions`. Brave: `brave://extensions`.)
 2. Turn on **Developer mode**. The switch is in the top-right corner.
    (In Edge, it is in the left sidebar.)
 3. Click **Load unpacked**. The button appears after you turn on Developer mode.
-4. Select the `teeth-exporter-main` folder (the one that holds `manifest.json`), then click
-   **Select**.
+4. Select the `teeth-exporter-chrome-edge-brave` folder (the one that holds `manifest.json`),
+   then click **Select**.
 5. **Teeth Exporter** now shows in your list of extensions.
 
-### 3. Pin the icon
+**3. Pin the icon**
 
 1. Click the puzzle-piece icon in the browser toolbar.
 2. Click the pin next to **Teeth Exporter**.
 
 The mint tooth icon now stays in your toolbar.
 
-### Update to a new version
+**Update to a new version:** download the new zip, unzip it, and replace the old folder with the
+new one. Then go to `chrome://extensions` and click the reload arrow on **Teeth Exporter**.
 
-1. Download the ZIP again and unzip it.
-2. Replace the old `teeth-exporter-main` folder with the new one.
-3. Go to `chrome://extensions` and click the reload arrow on **Teeth Exporter**.
+**Remove it:** go to `chrome://extensions` and click **Remove** on **Teeth Exporter**. Then
+delete the folder.
 
-### Remove it
+### Firefox
 
-Go to `chrome://extensions` and click **Remove** on **Teeth Exporter**. Then delete the folder.
+Needs Firefox 128 or newer.
+
+Firefox only keeps add-ons that Mozilla has signed. This one is not signed yet, so Firefox loads
+it as a **temporary add-on**. It works fully, but Firefox removes it when you quit Firefox.
+After each restart, do step 2 again.
+
+**1. Download it**
+
+Download `teeth-exporter-firefox.zip`. Do not unzip it. Keep it somewhere it can stay.
+
+**2. Load it**
+
+1. Open a new tab and go to `about:debugging#/runtime/this-firefox`.
+2. Click **Load Temporary Add-on...**.
+3. Select `teeth-exporter-firefox.zip`, then click **Open**.
+4. **Teeth Exporter** now shows under Temporary Extensions.
+
+**3. Pin the icon**
+
+1. Click the puzzle-piece icon in the toolbar.
+2. Click the gear next to **Teeth Exporter**, then click **Pin to Toolbar**.
+
+**Remove it:** quit Firefox, or click **Remove** on `about:debugging#/runtime/this-firefox`.
 
 ---
 
@@ -126,7 +159,8 @@ no network requests of its own.
 ### Code
 
 ```
-manifest.json            extension manifest (MV3)
+manifest.json            extension manifest (MV3, Chrome/Edge/Brave)
+build/package.js         builds both release zips into dist/ (the Firefox one gets its own manifest)
 src/capture.js           captures the scan file (page context)
 src/webgl_capture.js     captures the drawn gums (page context)
 src/viewer_bridge.js     reads and sets the viewer's aligner (page context)
@@ -143,8 +177,10 @@ icons/src/icon.svg       source of the toolbar icon
 test/                    offline test suites
 ```
 
-There is no build step and there are no dependencies. Edit `src/`, then click the reload arrow
-on `chrome://extensions`.
+There are no dependencies. In Chrome, load this folder unpacked, edit `src/`, then click the
+reload arrow on `chrome://extensions`. For Firefox, or to make the release zips, run
+`node build/package.js` and load `dist/teeth-exporter-firefox/manifest.json` from
+`about:debugging`. The code is the same for both browsers; only the manifest differs.
 
 ### Tests
 
@@ -156,6 +192,7 @@ node test/validate_stage_probe.js    reading the aligner from page text
 node test/validate_webgl_capture.js  the gum capture keeps the right meshes
 node test/validate_all_stages.js     the every-aligner loop, folders, and Cancel
 node test/validate_hardening.js      message lock, zip and mesh size limits, scan never in captured files
+node test/firefox/run.js             the Firefox build in a real Firefox (run node build/package.js first)
 ```
 
 The parity tests read a real scan from a private folder that is not part of this repository.
@@ -179,7 +216,7 @@ Point the `DATA` path in a test at any extracted scan to run them.
 ## Roadmap
 
 - Attachments export (the planned bumps are in the scan file)
-- Firefox version
+- Signed Firefox version (so it stays installed after a restart)
 - 3D preview in the panel
 
 ---

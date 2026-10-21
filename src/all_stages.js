@@ -36,10 +36,11 @@
         var id = "all-" + Date.now().toString(36) + "-" + (++seq), done = false;
         function finish(v) { if (done) return; done = true; root.removeEventListener("message", onMsg); resolve(v); }
         function onMsg(ev) {
-          if (ev.source !== root) return;
+          if (ev.source !== (root.window || root)) return;
           var d = ev.data;
           if (!d || d.source !== TAG || d.kind !== replyKind || d.reqId !== id) return;
           if (!d.token || !tokens[d.token]) return;
+          if (typeof cloneInto === "function") { try { d = structuredClone(d); } catch (e) { return; } }   // Firefox: see controller.js
           finish(d);
         }
         root.addEventListener("message", onMsg);
