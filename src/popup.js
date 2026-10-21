@@ -24,10 +24,17 @@
     });
   }
 
+  // the sites in the manifest; Firefox can leave these switched off, and then nothing gets captured
+  var origins = chrome.runtime.getManifest().host_permissions || [];
+
   document.body.style.margin = "0";
   globalThis.TeethPanel({
     mount: document.body,
     mode: "popup",
+    access: {
+      check: function () { return new Promise(function (r) { chrome.permissions.contains({ origins: origins }, function (v) { r(v !== false); }); }); },
+      request: function () { return new Promise(function (r) { chrome.permissions.request({ origins: origins }, function (v) { r(!!v); }); }); }
+    },
     adapter: {
       status: function () { return sendToTab({ cmd: "status" }); },
       run: function (name, args) { return sendToTab({ cmd: "run", name: name, args: args }); }

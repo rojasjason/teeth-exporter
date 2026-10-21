@@ -8,6 +8,8 @@
  * Exposes globalThis.TeethPanel({ mount, adapter, mode }) -> { refresh() }
  *   mount    element or ShadowRoot to render into
  *   adapter  { status() -> Promise<status|null>, run(name, args) -> Promise<result|null> }
+ *   access   optional { check() -> Promise<bool>, request() -> Promise<bool> }: site access. Firefox
+ *            lets people switch it off per site; without it the viewer frame never gets our scripts.
  *            null means the viewer can't be reached
  *   mode     "popup" | "floating"
  */
@@ -185,9 +187,15 @@
     // help (shown until a scan is captured)
     var help = el("div", "te-body");
     var ol = el("ol", "te-help");
-    ["Open your ClinCheck 3D treatment plan in this tab.", "Let the 3D model load and rotate it once.", "The buttons show up here when the scan is ready."]
+    ["Open your ClinCheck 3D treatment plan in this tab.", "Let the 3D model load and rotate it once.", "The buttons show up here when the scan is ready.", "Still waiting? Reload the page, then open the 3D plan again."]
       .forEach(function (t) { ol.appendChild(el("li", null, t)); });
     help.appendChild(ol);
+
+    // site access (Firefox only in practice: Chrome grants it at install)
+    var perm = el("div", "te-body"); perm.hidden = true;
+    var btnPerm = el("button", "te-btn te-btn--solid", "Allow access");
+    var hintPerm = el("p", "te-hint", "Your browser asks first before an add-on can read a site. Allow Invisalign and ClinCheck sites. Then reload the ClinCheck page.");
+    perm.appendChild(btnPerm); perm.appendChild(hintPerm);
 
     var msg = el("p", "te-msg");
 
@@ -214,7 +222,7 @@
 
     var foot = el("span", "te-label te-foot", "Runs locally. Nothing is uploaded.");
 
-    [head, status, main, help, msg, adv, foot].forEach(function (n) { rootEl.appendChild(n); });
+    [head, status, main, help, perm, msg, adv, foot].forEach(function (n) { rootEl.appendChild(n); });
     mount.appendChild(rootEl);
 
     var buttons = [btnOne, btnAll, btnRaw, btnDiag, btnGl];
@@ -247,7 +255,24 @@
       if (s.total) input.max = String(s.total);
     }
 
-    function refresh() { return adapter.status().then(render, function () { render(null); }); }
+    function refresh() {
+      var ok = opts.access ? opts.access.check().catch(function () { return true; }) : Promise.resolve(true);
+      return ok.then(function (has) {
+        perm.hidden = has;
+        if (!has) {
+          setStatus("waiting", "Needs access to ClinCheck sites");
+          main.hidden = true; adv.hidden = true; help.hidden = true;
+          return;
+        }
+        return adapter.status().then(render, function () { render(null); });
+      });
+    }
+    btnPerm.addEventListener("click", function () {
+      opts.access.request().then(function (granted) {
+        if (granted) { perm.hidden = true; setMsg("Access allowed. Reload the ClinCheck page, then open the 3D plan again."); }
+        else setMsg("Access was not allowed. The add-on can't read the viewer without it.", true);
+      });
+    });
 
     function overrideValue() { var v = (input.value || "").trim(); return v === "" ? null : (parseInt(v, 10) || 1); }
 

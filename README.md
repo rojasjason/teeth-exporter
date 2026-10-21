@@ -192,7 +192,7 @@ node test/validate_stage_probe.js    reading the aligner from page text
 node test/validate_webgl_capture.js  the gum capture keeps the right meshes
 node test/validate_all_stages.js     the every-aligner loop, folders, and Cancel
 node test/validate_hardening.js      message lock, zip and mesh size limits, scan never in captured files
-node test/firefox/run.js             the Firefox build in a real Firefox (run node build/package.js first)
+node test/firefox/run.js             the Firefox build in a real Firefox: every export + the Allow access screen (IFRAME=1 puts the viewer in a cross-site frame; run node build/package.js first)
 ```
 
 The parity tests read a real scan from a private folder that is not part of this repository.

@@ -11,8 +11,11 @@ fs.mkdirSync(DL); fs.mkdirSync(PROF);
 // extension copy + test hooks (in the temp folder: macOS blocks Firefox from profiles under ~/Desktop)
 fs.cpSync(REPO + "/dist/teeth-exporter-firefox", EXT, { recursive: true });
 const man = JSON.parse(fs.readFileSync(path.join(EXT, "manifest.json")));
-man.host_permissions.push("http://localhost/*");
-man.content_scripts.forEach((c) => c.matches.push("http://localhost/*"));
+man.host_permissions.push("http://localhost/*", "http://127.0.0.1/*");
+man.content_scripts.forEach((c) => c.matches.push("http://localhost/*", "http://127.0.0.1/*"));
+// IFRAME=1: the viewer sits in a cross-origin iframe, like the real portal (aligntech.com inside invisalign.com)
+const IFRAME = !!process.env.IFRAME;
+const UUID = "7e3f0c1a-5b2d-4c8e-9a61-2f4d8b0c7e15";   // fixed moz-extension:// host, so the test can open the popup page
 man.content_scripts[1].js.push("bridge.js");
 fs.writeFileSync(path.join(EXT, "manifest.json"), JSON.stringify(man, null, 2));
 fs.copyFileSync(path.join(T, "bridge.js"), path.join(EXT, "bridge.js"));
@@ -25,15 +28,17 @@ const GLB = fs.readFileSync(path.join(HAND, "captures/rendered_meshes_20260625.g
 const srv = http.createServer((q, s) => {
   if (q.url.startsWith("/treatment_plan_video_wcc")) { s.writeHead(200, { "content-type": "application/octet-stream" }); return s.end(ZIP); }
   if (q.url === "/meshes.glb") { s.writeHead(200, { "content-type": "model/gltf-binary" }); return s.end(GLB); }
-  s.writeHead(200, { "content-type": "text/html" }); s.end(fs.readFileSync(path.join(T, "site/index.html")));
+  s.writeHead(200, { "content-type": "text/html" });
+  if (q.url === "/outer") return s.end('<!doctype html><title>READY outer</title><iframe src="http://127.0.0.1:8723/" width="700" height="520"></iframe>');
+  s.end(fs.readFileSync(path.join(T, "site/index.html")));
 }).listen(8723);
 fs.writeFileSync(path.join(PROF, "user.js"), [
   ['browser.download.dir', DL], ['browser.download.folderList', 2], ['browser.download.useDownloadDir', true],
   ['browser.download.always_ask_before_handling_new_types', false], ['browser.download.start_downloads_in_tmp_dir', false],
   ['browser.helperApps.neverAsk.saveToDisk', 'application/zip,application/octet-stream'], ['browser.download.panel.shown', true],
-  ['webgl.force-enabled', true], ['extensions.manifestV3.enabled', true], ['browser.shell.checkDefaultBrowser', false]
+  ['webgl.force-enabled', true], ['extensions.webextensions.uuids', JSON.stringify({ "teeth-exporter@rojasjason.github.io": UUID })], ['extensions.manifestV3.enabled', true], ['browser.shell.checkDefaultBrowser', false]
 ].map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`).join("\n"));
-cp.execFileSync("open", ["-na", "Firefox", "--args", "-headless", "--remote-debugging-port", "9335", "-profile", PROF, "-no-remote"]);
+cp.execFileSync("open", ["-na", "Firefox", "--args", "-headless", "--remote-debugging-port", "9335", "-remote-allow-system-access", "-profile", PROF, "-no-remote"]);
 const ff = { kill() { try { cp.execSync("pkill -f " + JSON.stringify(PROF)); } catch (e) {} } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let ws, id = 0; const pend = {};
@@ -46,7 +51,8 @@ const results = []; function check(n, c, extra) { results.push(c); console.log((
   const inst = await bidi("webExtension.install", { extensionData: { type: "path", path: EXT } });
   check("Firefox installs the extension", !!inst.extension, inst.extension);
   const tree = await bidi("browsingContext.getTree", {}); const ctx = tree.contexts[0].context;
-  await bidi("browsingContext.navigate", { context: ctx, url: "http://localhost:8723/", wait: "complete" });
+  await bidi("browsingContext.navigate", { context: ctx, url: IFRAME ? "http://localhost:8723/outer" : "http://localhost:8723/", wait: "complete" });
+  if (IFRAME) console.log("  (viewer in a cross-origin iframe)");
   const ev = async (expr) => (await bidi("script.evaluate", { expression: expr, target: { context: ctx }, awaitPromise: true })).result.value;
   let title; for (let i = 0; i < 40; i++) { title = await ev("document.title"); if (/READY|ERR|NO-WEBGL/.test(title)) break; await sleep(250); }
   check("fake viewer draws with WebGL2", /READY/.test(title), title);
@@ -75,5 +81,28 @@ const results = []; function check(n, c, extra) { results.push(c); console.log((
   r = await run("run", "diag", {}); await waitDl(4, 8000); check("Download captured files", r && r.ok);
   r = await run("run", "glCapture", {}); await waitDl(5, 8000); check("Download rendered 3D", r && r.ok);
   console.log("downloads:", fs.readdirSync(DL).join(", "));
+
+  // the popup: with site access it shows the buttons; with access switched off it shows "Allow access"
+  const perms = await run("perms");
+  check("site access granted at install", perms && perms.has === true, JSON.stringify(perms));
+  async function openPopup() {
+    await bidi("browsingContext.activate", { context: ctx });
+    await run("open-popup"); await sleep(1200);
+    const t = await bidi("browsingContext.getTree", {});
+    const c = t.contexts.find((x) => /^moz-extension:.*popup\.html/.test(x.url));
+    return c && c.context;
+  }
+  async function allowShown() {
+    const p = await openPopup(); if (!p) return "no popup tab";
+    const v = (await bidi("script.evaluate", { expression: `(function(){ var b = [...document.querySelectorAll("button")].find(function (x) { return x.textContent === "Allow access"; }); return !!(b && !b.closest("[hidden]")) + " | " + document.body.innerText.replace(/\\s+/g, " ").slice(0, 90); })()`, target: { context: p }, awaitPromise: true })).result.value;
+    await bidi("browsingContext.close", { context: p });
+    return v;
+  }
+  let shown = await allowShown();
+  check("popup with access: no Allow button", /^false/.test(shown), shown);
+  const rv = await run("revoke");
+  check("access switched off", rv && rv.has === false, JSON.stringify(rv));
+  shown = await allowShown();
+  check("popup without access: shows Allow access", /^true/.test(shown), shown);
   console.log(results.every(Boolean) ? "\nPASS  Firefox" : "\nFAIL  Firefox");
 })().catch((e) => console.log("HARNESS ERROR", e.message)).finally(() => { try { ff.kill(); } catch (e) {} srv.close(); setTimeout(() => process.exit(0), 300); });
