@@ -5,3 +5,5 @@ node_modules/
 # internal working doc — resume state, not for the public repo
 HANDOFF.md
 dist/
+# internal plan doc
+VIEWERS-PLAN.md
