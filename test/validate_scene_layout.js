@@ -83,9 +83,13 @@ for (const [jaw, mesh] of [["Upper Jaw", upperMesh], ["Lower Jaw", lowerMesh]]) 
   objs.push({ name: "GingivaMorph" + jaw + "0", parent: jaw, mesh: gname, morphTargets: [gname],
     motion: { morph: { "0": { morphTarget: 0 } } }, visibility: [0, -1] });
 }
-sceneFiles["scene.json"] = enc({ rotationCenter: { x: 0, y: 0, z: 0 }, sceneObjects: objs, version: 23 });
-sceneFiles["toothNumbers.json"] = enc(toothNumbers);
-const sceneZip = fflate.zipSync(sceneFiles, { level: 0 });
+function zipScene(objList, tn, extra) {
+  const f = Object.assign({}, sceneFiles, extra || {});
+  f["scene.json"] = enc({ rotationCenter: { x: 0, y: 0, z: 0 }, sceneObjects: objList, version: 23 });
+  f["toothNumbers.json"] = enc(tn);
+  return fflate.zipSync(f, { level: 0 });
+}
+const sceneZip = zipScene(objs, toothNumbers);
 
 // ---- compare ----
 const rPlan = engine.stageRange(planZip), rScene = engine.stageRange(sceneZip);
@@ -125,6 +129,65 @@ for (const g of gums) {
 const all = engine.exportAllStages(sceneZip);
 check(all.stageCount === rPlan.max + 1 && Object.keys(all.outputs).some((k) => /with_gums\.stl$/.test(k)),
   `every-stage export from the file: ${all.stageCount} stages, gums in each`);
+
+// ---- case types of the older viewer (all synthetic, built from the same fixture) ----
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const toothNodes = objs.filter((o) => /^Tooth_\d+$/.test(o.name));
+const upperTooth = toothNodes.find((o) => o.parent === "Upper Jaw"), lowerTooth = toothNodes.find((o) => o.parent === "Lower Jaw");
+const otherMesh = toothNodes.find((o) => o !== upperTooth && o.parent === "Upper Jaw").mesh;
+const baseStats = (stage) => engine.exportFromBundle(sceneZip, { stage, glb: false }).stats;
+const statsOf = (zip, stage) => engine.exportFromBundle(zip, { stage, glb: false });
+const sameStats = (a, b) => a.teeth === b.teeth && a.vertices === b.vertices && close(a.bboxMin, b.bboxMin) && close(a.bboxMax, b.bboxMax) && close(a.centroid, b.centroid);
+const MID = Math.max(1, rPlan.max >> 1);
+
+// teen: the tooth's mesh moves onto children; the viewer shows TeenVirtual, not TeenReal or CBCT
+{
+  const o2 = clone(objs), t = o2.find((o) => o.name === upperTooth.name), mesh = t.mesh;
+  delete t.mesh;
+  o2.push({ name: "TeenReal_" + t.name, parent: t.name, mesh: otherMesh });
+  o2.push({ name: "CBCT_" + t.name, parent: t.name, mesh: otherMesh });
+  o2.push({ name: "TeenVirtual_" + t.name, parent: t.name, mesh, position: [0, 0, 0], rotation: [0, 0, 0, 1] });
+  check(sameStats(statsOf(zipScene(o2, toothNumbers), rPlan.max).stats, baseStats(rPlan.max)), "teen tooth: TeenVirtual child used, TeenReal and CBCT skipped");
+}
+// a tooth shown only on some steps (an extraction): [0, MID) visible, gone from MID on
+{
+  const o2 = clone(objs);
+  o2.find((o) => o.name === lowerTooth.name).visibility = [0, MID];
+  const z = zipScene(o2, toothNumbers);
+  check(statsOf(z, 0).stats.teeth === 28 && statsOf(z, MID).stats.teeth === 27 && statsOf(z, rPlan.max).stats.teeth === 27,
+    `tooth with visibility [0, ${MID}]: 28 teeth before step ${MID}, 27 from it on`);
+}
+// an ExtractedTooth node with its own mesh, numbered through toothNumbers.extractedTooth
+{
+  const o2 = clone(objs), tn = clone(toothNumbers);
+  o2.push({ name: "ExtractedTooth_x", parent: "Lower Jaw", mesh: lowerTooth.mesh, basis: [0, 0, 0], motion: {}, visibility: [0, MID] });
+  tn["99"] = { dentalTypeID: 30, parent: "Pontic_x", extractedTooth: "ExtractedTooth_x" };
+  const z = zipScene(o2, tn), r0 = statsOf(z, 0);
+  check(r0.stats.teeth === 29 && r0.manifest.some((m) => m.id === "ExtractedTooth_x" && m.uns === 30 && m.arch === "L") && statsOf(z, MID).stats.teeth === 28,
+    "extracted tooth: exported while visible, UNS from toothNumbers, gone after");
+}
+// two gum nodes for one jaw, each for a range of steps, plus a teen gum that wins when present
+{
+  const o2 = clone(objs).filter((o) => o.name !== "GingivaMorphUpper Jaw0");
+  o2.push({ name: "GingivaMorphUpper Jaw0", parent: "Upper Jaw", mesh: "GA.ctm", morphTargets: ["GA.ctm"], motion: { morph: { "0": { morphTarget: 0 } } }, visibility: [0, MID] });
+  o2.push({ name: "GingivaMorphUpper Jaw1", parent: "Upper Jaw", mesh: "GB.ctm", morphTargets: ["GB.ctm"], motion: { morph: { "0": { morphTarget: 0 } } }, visibility: [MID, -1] });
+  const extra = { "GA.ctm": sceneFiles[upperTooth.mesh], "GB.ctm": sceneFiles[otherMesh] };
+  const gumU = (zip, s) => statsOf(zip, s).gumInfo.gums.find((g) => g.arch === "U");
+  const nA = engine.decodeCTM(extra["GA.ctm"]).vertices.length / 3, nB = engine.decodeCTM(extra["GB.ctm"]).vertices.length / 3;
+  const z = zipScene(o2, toothNumbers, extra);
+  check(gumU(z, 0).verts.length / 3 === nA && gumU(z, MID).verts.length / 3 === nB, "split upper gum: the node in range is used at each step");
+  o2.push({ name: "TeenGingivaMorphUpper Jaw0", parent: "Upper Jaw", mesh: "GB.ctm", morphTargets: ["GB.ctm"], motion: { morph: { "0": { morphTarget: 0 } } } });
+  const zt = zipScene(o2, toothNumbers, extra);
+  check(gumU(zt, 0).verts.length / 3 === nB, "teen gum present: used instead of the regular gum");
+}
+
+// a zip of meshes in a layout nobody reads: the engine refuses it, and its file list is readable
+{
+  const odd = fflate.zipSync({ "a.ctm": sceneFiles[upperTooth.mesh], "b.ctm": sceneFiles[otherMesh], "c.ctm": sceneFiles[otherMesh], "layout.json": enc({}) }, { level: 0 });
+  let threw = false; try { engine.stageRange(odd); } catch (e) { threw = true; }
+  const list = engine.listZip(odd);
+  check(threw && list.length === 4 && list.every((f) => typeof f.name === "string" && f.size > 0), "unknown layout: refused, file list readable without unpacking");
+}
 
 // ---- optional: a real simulation bundle kept outside the repo ----
 if (process.env.SIM_BUNDLE) {

@@ -187,11 +187,31 @@
     var jawPair = { upper: jaw(UJ), lower: jaw(LJ), rotationCenter: [0, 0, 0],
       rotation: quat(JP.rotation), position: vec(JP.position, [0, 0, 0]) };
     var archOfJaw = { "Upper Jaw": "U", "Lower Jaw": "L" };
+    try {                                                   // an extracted tooth's node -> its UNS number
+      var tn2 = files["toothNumbers.json"] ? readJSON(files, "toothNumbers.json") : {};
+      for (var k2 in tn2) if (tn2[k2] && tn2[k2].extractedTooth && tn2[k2].dentalTypeID != null) nums[tn2[k2].extractedTooth] = +tn2[k2].dentalTypeID;
+    } catch (e) {}
+    var children = {};                                      // parent name -> child nodes
+    objs.forEach(function (o) { if (o && typeof o.parent === "string") (children[o.parent] = children[o.parent] || []).push(o); });
+    function vis(o) { return (Array.isArray(o && o.visibility) && o.visibility.length >= 2 && isFinite(o.visibility[0]) && isFinite(o.visibility[1])) ? [+o.visibility[0], +o.visibility[1]] : null; }
 
+    // Teeth: Tooth_NN and ExtractedTooth_NN nodes under a jaw. A tooth with no mesh of its own carries
+    // it on a child, chosen like the viewer's defaults: TeenVirtual (teen view is on), PreRestorative
+    // (restorations hidden), TeenReal; never CBCT roots, veneers or the viewer's own "super" copies.
+    var CHILD_PICK = [/^TeenVirtual/, /^PreRestorative/, /^TeenReal/];
     var teeth = [];
     objs.forEach(function (o) {
-      if (!o || typeof o.mesh !== "string" || !/^Tooth_\d+$/.test(o.name) || !archOfJaw[o.parent]) return;
-      var uns = nums[o.name] != null ? nums[o.name] : parseInt(o.name.slice(6), 10);
+      if (!o || !/^(Tooth|ExtractedTooth)/.test(o.name) || !archOfJaw[o.parent]) return;
+      var src = typeof o.mesh === "string" ? o : null, local = null;
+      if (!src) {
+        var kids = (children[o.name] || []).filter(function (c) { return typeof c.mesh === "string"; });
+        for (var p = 0; p < CHILD_PICK.length && !src; p++) src = kids.filter(function (c) { return CHILD_PICK[p].test(c.name); })[0] || null;
+        if (!src) return;
+        if (src.position || src.rotation) local = { R: quatToMat3(quat(src.rotation)), t: vec(src.position, [0, 0, 0]) };
+      }
+      var digits = /(\d+)\s*$/.exec(o.name);
+      var uns = nums[o.name] != null ? nums[o.name] : (digits ? parseInt(digits[1], 10) : NaN);
+      if (!isFinite(uns)) return;
       var mp = (o.motion && o.motion.position) || {}, mr = (o.motion && o.motion.rotation) || {}, motion = {};
       Object.keys(mp).concat(Object.keys(mr)).forEach(function (s) {
         if (!/^\d+$/.test(s) || motion[s]) return;          // skip "key" (the interpolation shape)
@@ -199,18 +219,20 @@
         motion[s] = { position: vec([p.x, p.y, p.z], [0, 0, 0]), rotation: quat(r.quaternion) };
       });
       teeth.push({ id: o.name, dentalTypeID: uns, arch: archOfJaw[o.parent], basis: vec(o.basis, [0, 0, 0]),
-        motion: motion, mesh: o.mesh });
+        motion: motion, mesh: src.mesh, local: local, visibility: vis(src !== o && vis(src) ? src : o) });
     });
     if (!teeth.length) throw new Error("no teeth in WCC bundle");
 
+    // Gums: GingivaMorph<Jaw>N nodes (several per jaw when each covers a range of steps) and their
+    // teen versions (TeenGingiva...), which the viewer shows instead whenever they exist.
     var gums = [];
     objs.forEach(function (o) {
-      if (!o || !/^GingivaMorph/.test(o.name) || !archOfJaw[o.parent]) return;
+      if (!o || !/^(Teen)?Gingiva/.test(o.name) || !archOfJaw[o.parent]) return;
       var targets = Array.isArray(o.morphTargets) && o.morphTargets.length ? o.morphTargets : (typeof o.mesh === "string" ? [o.mesh] : []);
       if (!targets.length) return;
       var keys = {}, morph = (o.motion && o.motion.morph) || {};
       for (var s in morph) if (/^\d+$/.test(s) && morph[s] && isFinite(morph[s].morphTarget)) keys[s] = morph[s].morphTarget | 0;
-      gums.push({ arch: archOfJaw[o.parent], targets: targets, keys: keys });
+      gums.push({ arch: archOfJaw[o.parent], targets: targets, keys: keys, teen: /^Teen/.test(o.name), visibility: vis(o) });
     });
     return { layout: "scene", jawPair: jawPair, teeth: teeth, gums: gums,
       meshName: function (t) { return t.mesh; } };
@@ -235,14 +257,26 @@
     return { vertices: V, faces: a.faces };
   }
 
-  // gums shipped inside a scene bundle, seated with the teeth's chain at the chosen stage
+  // the viewer's rule: shown at stage s when first <= s < last, last -1 = to the end; no range = always
+  function visibleAt(v, stage) { return !v || (v[0] <= stage && (v[1] > stage || v[1] === -1)); }
+
+  // gums shipped inside a scene bundle, seated with the teeth's chain at the chosen stage. Per arch:
+  // only the gum nodes shown at this stage, teen versions over the regular ones, several shown
+  // pieces merged into one mesh.
   function bundleGums(files, plan, seated) {
     var out = [];
-    plan.gums.forEach(function (g) {
-      if (!seated.teeth.some(function (t) { return t.arch === g.arch; })) return;
-      var m = gumAtStage(files, g, seated.stage);
-      if (!m) return;
-      out.push({ arch: g.arch, verts: seatArray(seated.seater, m.vertices, g.arch), faces: m.faces, cost: 0 });
+    ["U", "L"].forEach(function (arch) {
+      if (!seated.teeth.some(function (t) { return t.arch === arch; })) return;
+      var shown = plan.gums.filter(function (g) { return g.arch === arch && visibleAt(g.visibility, seated.stage); });
+      if (shown.some(function (g) { return g.teen; })) shown = shown.filter(function (g) { return g.teen; });
+      var parts = [];
+      shown.forEach(function (g) {
+        var m = gumAtStage(files, g, seated.stage);
+        if (m) parts.push({ verts: seatArray(seated.seater, m.vertices, arch), faces: m.faces });
+      });
+      if (!parts.length) return;
+      var merged = parts.length === 1 ? parts[0] : concatMeshes(parts);
+      out.push({ arch: arch, verts: merged.verts, faces: merged.faces, cost: 0 });
     });
     return out;
   }
@@ -293,6 +327,15 @@
     for (var i = 0; i < keys.length; i++) files[keys[i].split("/").pop()] = raw[keys[i]]; // flatten to basenames
     return files;
   }
+  // names + sizes of a zip's entries, nothing inflated (for the "can't read this scan" report)
+  function listZip(zipBytes) {
+    var out = [];
+    fflate.unzipSync(zipBytes, { filter: function (f) {
+      if (out.length < 500) out.push({ name: String(f.name), size: f.originalSize | 0 });
+      return false;
+    } });
+    return out;
+  }
   function readJSON(files, name) {
     var b = files[name];
     if (!b) throw new Error("missing " + name + " in WCC bundle");
@@ -313,6 +356,7 @@
       var t = teethMeta[i];
       var ctmName = plan.meshName(t);
       if (!files[ctmName]) continue;               // pontic / missing tooth: no mesh
+      if (!visibleAt(t.visibility, stage)) continue;  // scene layout: e.g. an extracted tooth after its step
       var arch = archOf(t);
       var dec = decodeCTM(files[ctmName]);
       var sv = dec.vertices;                        // Float32Array meters, length 3N
@@ -322,6 +366,7 @@
       var minx = Infinity, maxx = -Infinity;
       for (var j = 0; j < N; j++) {
         var p = [sv[3 * j], sv[3 * j + 1], sv[3 * j + 2]];
+        if (t.local) p = rotateAboutAdd(p, t.local.R, [0, 0, 0], t.local.t);   // a child mesh's own placement
         if (motion) p = rotateAboutAdd(p, motion.R, motion.basis, motion.pos);
         var w = seater.seat(p, arch);
         out[3 * j] = w[0]; out[3 * j + 1] = w[1]; out[3 * j + 2] = w[2];
@@ -764,7 +809,8 @@
     stageDirName: stageDirName,
     LIMITS: LIMITS,
     allFinite: allFinite,
-    unzip: unzip
+    unzip: unzip,
+    listZip: listZip
   };
 
   if (typeof module === "object" && module.exports) module.exports = api;

@@ -10,6 +10,7 @@
  *
  * Exposes globalThis.TeethController(hooks) -> { state, status(), run(name, args) -> Promise<result> }
  *   hooks.onCapture(state)      the scan arrived
+ *   hooks.onUnreadable(state)   a scan arrived in a layout this version can't read
  *   hooks.onStep(info)          current aligner changed: {aligner, total}
  *   hooks.onProgress(p)         every-aligner export progress: {aligner, total}
  *   hooks.onRunStart(name)      a command started
@@ -38,6 +39,7 @@
       glReqId: 0, glPending: null,                        // WebGL snapshot round trip
       maxStage: null, currentStep: null, stepTotal: null, stepSource: null, firstStage: 0,
       bundleGums: false,                                  // the scan file carries its own gums (Outcome Simulation)
+      unreadable: null,                                   // a scan arrived in a layout this version can't read
       busy: null, progress: null, cancelled: false        // command in flight + every-aligner progress
     };
 
@@ -154,7 +156,8 @@
         // only a real treatment-plan bundle replaces the scan: another zip the portal fetches later
         // (or junk) must not clobber a good capture
         var range;
-        try { range = engine.stageRange(wb); } catch (e) { return; }
+        try { range = engine.stageRange(wb); } catch (e) { noteUnreadable(wb, e); return; }
+        state.unreadable = null;
         state.bytes = wb; state.url = typeof d.url === "string" ? d.url : ""; state.size = wb.length; state.capturedAt = Date.now();
         state.maxStage = range.max;
         state.bundleGums = !!range.bundleGums;
@@ -182,6 +185,32 @@
         state.resources.push(rec);
       }
     });
+
+    // A zip full of meshes that the engine can't read is a scan in a layout this version doesn't
+    // know (a new or regional viewer). Say so instead of waiting forever, and keep only what a bug
+    // report needs: file names (ID-like parts removed) and sizes. Never the scan, never the URL.
+    var MESH_FILE = /\.(ctm|glb|gltf|drc|ply|stl|obj)$/i;
+    function noteUnreadable(wb, err) {
+      if (state.bytes) return;                                  // a good scan already arrived
+      var list;
+      try { list = engine.listZip(wb); } catch (e) { return; }
+      if (list.filter(function (f) { return MESH_FILE.test(f.name); }).length < 3) return;   // some other zip
+      state.unreadable = {
+        files: list.map(function (f) { return { name: f.name.split("/").map(redactId).join("/"), size: f.size }; }),
+        reason: String(err && err.message || err).slice(0, 200)
+      };
+      emit("onUnreadable", state);
+    }
+    function fileListText() {
+      var u = state.unreadable, v = "";
+      try { v = chrome.runtime.getManifest().version; } catch (e) {}
+      var lines = ["Teeth Exporter " + v + " could not read this scan.",
+        "Viewer site: " + (location && location.host || "unknown"),
+        "Reason: " + u.reason,
+        "Files in the scan (" + u.files.length + "):"];
+      u.files.forEach(function (f) { lines.push("  " + f.name + "  " + f.size); });
+      return lines.join("\n");
+    }
 
     // ---- helpers ----
     function download(bytes, filename) {
@@ -392,7 +421,7 @@
 
     function status() {
       return {
-        captured: !!state.bytes, size: state.size,
+        captured: !!state.bytes, size: state.size, unreadable: !state.bytes && !!state.unreadable,
         aligner: state.currentStep != null ? alignerOf(state.currentStep) : null, total: state.stepTotal,
         busy: state.busy, progress: state.busy === "allStages" ? state.progress : null,
         files: Object.keys(state.payloads).length
@@ -400,6 +429,9 @@
     }
     function run(name, args) {
       var cmd = commands[name];
+      if (name === "fileList") {
+        return Promise.resolve(state.unreadable ? { ok: true, text: fileListText() } : { ok: false, error: "There is no unreadable scan to report." });
+      }
       if (!cmd) return Promise.resolve({ ok: false, error: "unknown command" });
       if (!state.bytes) return Promise.resolve({ ok: false, error: "No scan yet. Open your 3D treatment plan and let it load." });
       if (state.busy) return Promise.resolve({ ok: false, error: "Still working on the last export." });

@@ -82,8 +82,18 @@ check("a token registered by a page script after ours is ignored", captures === 
 send({ kind: "wcc", token: "toString", bytes: ab(realZip), url: "x" });
 check("prototype names like 'toString' are not tokens", captures === 0);
 
+// a scan in a layout this version can't read: the panel is told, and the bug-report file list
+// carries names (ID-like parts removed) and sizes, never the scan or its URL
+const meshBytes = fs.readFileSync(path.join(DATA, fs.readdirSync(DATA).find((f) => /\.ctm$/i.test(f))));
+const oddZip = fflate.zipSync({ "case_12345678": { "a.ctm": meshBytes, "b.ctm": meshBytes, "c.ctm": meshBytes }, "layout.json": new TextEncoder().encode("{}") }, { level: 0 });
+send({ kind: "wcc", token: "tok-capture-1", bytes: ab(oddZip), url: "https://viewer.test/secret/case_12345678.zip?sig=abc" });
+check("an unreadable scan is reported, not dropped", captures === 0 && ctl.status().unreadable === true && !ctl.status().captured);
+let listResult = null;
+ctl.run("fileList").then((r) => { listResult = r; });
+
 send({ kind: "wcc", token: "tok-capture-1", bytes: ab(realZip), url: "https://viewer.test/treatment_plan_video_wcc" });
 check("our own token delivers the real scan", captures === 1 && ctl.status().captured);
+check("a readable scan clears the unreadable notice", ctl.status().unreadable === false);
 
 const junk = fflate.zipSync({ "readme.txt": new TextEncoder().encode("not a plan") });
 send({ kind: "wcc", token: "tok-capture-1", bytes: ab(junk), url: "https://viewer.test/other.zip" });
@@ -101,6 +111,9 @@ ctl.run("diag").then((r) => {
   const zip = fflate.unzipSync(blob.parts[0]);
   const names = Object.keys(zip);
   check("captured-files zip leaves the scan out (" + names.join(", ") + ")", r.ok && !names.some((n) => /\.zip$/i.test(n)) && names.includes("mesh.ctm"));
+  const t = listResult && listResult.text || "";
+  check("file list: names and sizes, ID and URL left out", listResult && listResult.ok && /:id\/a\.ctm\s+\d+/.test(t) && /layout\.json/.test(t) &&
+    !/12345678|secret|sig=|viewer\.test\/|treatment_plan/.test(t));
   console.log("\n" + (pass ? "PASS  hardening holds" : "FAIL  hardening"));
   process.exit(pass ? 0 : 1);
 });

@@ -13,6 +13,7 @@
   var overlay = globalThis.TeethProgress ? globalThis.TeethProgress() : null;
   var ctl = globalThis.TeethController({
     onCapture: function (st) { send({ type: "wcc-captured", size: st.size }); },
+    onUnreadable: function () { send({ type: "wcc-unreadable" }); },
     onStep: function (i) { send({ type: "stage-step", step: i.aligner, total: i.total }); },
     onProgress: function (p) { send({ type: "stage-step", step: p.aligner, total: p.total, progress: true }); if (overlay) overlay.update(p); },
     onRunStart: function (name) { if (overlay && name === "allStages") overlay.show({ onCancel: function () { ctl.cancel(); } }); },

@@ -29,6 +29,18 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     chrome.action.setBadgeBackgroundColor({ tabId: tabId, color: "#2BB58A" });
     chrome.action.setTitle({ tabId: tabId, title: "Teeth Exporter: scan ready (" + fmtSize(msg.size || 0) + ")" });
   }
+  // a scan this version can't read: point the popup at that frame (unless a readable scan already
+  // claimed the tab) so it can say so, and mark the icon
+  if (msg.type === "wcc-unreadable" && tabId != null) {
+    chrome.storage.session.get(frameKey(tabId), function (o) {
+      if (o && typeof o[frameKey(tabId)] === "number") return;
+      var rec = {}; rec[frameKey(tabId)] = (sender.frameId != null) ? sender.frameId : 0;
+      chrome.storage.session.set(rec);
+      chrome.action.setBadgeText({ tabId: tabId, text: "?" });
+      chrome.action.setBadgeBackgroundColor({ tabId: tabId, color: "#D9822B" });
+      chrome.action.setTitle({ tabId: tabId, title: "Teeth Exporter: found a scan this version can't read yet" });
+    });
+  }
   // live aligner-step badge: reflect the step the user is currently viewing
   if (msg.type === "stage-step" && tabId != null && msg.step != null) {
     chrome.action.setBadgeText({ tabId: tabId, text: "A" + msg.step });           // the viewer's aligner number

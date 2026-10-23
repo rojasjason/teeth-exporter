@@ -197,6 +197,14 @@
     var hintPerm = el("p", "te-hint", "Your browser asks first before an add-on can read a site. Allow Invisalign and ClinCheck sites. Then reload the ClinCheck page.");
     perm.appendChild(btnPerm); perm.appendChild(hintPerm);
 
+    // a scan arrived in a layout this version can't read (a new or regional viewer)
+    var unk = el("div", "te-body"); unk.hidden = true;
+    var btnList = el("button", "te-btn te-btn--solid", "Copy file list");
+    var hintUnk = el("p", "te-hint", "This version can't read this viewer's scan yet. Copy the file list and paste it into a new issue on the Teeth Exporter GitHub page. It holds file names and sizes only, no scan data.");
+    var issues = el("a", "te-hint", "Open a new issue");
+    issues.href = "https://github.com/rojasjason/teeth-exporter/issues/new"; issues.target = "_blank"; issues.rel = "noopener";
+    unk.appendChild(btnList); unk.appendChild(hintUnk); unk.appendChild(issues);
+
     var msg = el("p", "te-msg");
 
     // advanced
@@ -222,7 +230,7 @@
 
     var foot = el("span", "te-label te-foot", "Runs locally. Nothing is uploaded.");
 
-    [head, status, main, help, perm, msg, adv, foot].forEach(function (n) { rootEl.appendChild(n); });
+    [head, status, main, help, perm, unk, msg, adv, foot].forEach(function (n) { rootEl.appendChild(n); });
     mount.appendChild(rootEl);
 
     var buttons = [btnOne, btnAll, btnRaw, btnDiag, btnGl];
@@ -235,9 +243,16 @@
     function setStatus(stateName, t) { status.setAttribute("data-state", stateName); statusText.textContent = t; }
 
     function render(s) {
+      unk.hidden = true;
       if (!s) {
         setStatus("waiting", mode === "popup" ? "Open your ClinCheck viewer" : "Waiting for the viewer");
         main.hidden = true; adv.hidden = true; help.hidden = false;
+        return;
+      }
+      if (!s.captured && s.unreadable) {
+        setStatus("waiting", "Found a scan it can't read yet");
+        main.hidden = true; adv.hidden = true; help.hidden = true; unk.hidden = false;
+        btnList.disabled = running;
         return;
       }
       if (!s.captured) {
@@ -327,6 +342,14 @@
     btnRaw.addEventListener("click", function () { run("raw"); });
     btnDiag.addEventListener("click", function () { run("diag"); });
     btnGl.addEventListener("click", function () { run("glCapture"); });
+    btnList.addEventListener("click", function () {
+      adapter.run("fileList").then(function (r) {
+        if (!r || !r.ok) { setMsg((r && r.error) || LOST, true); return; }
+        return navigator.clipboard.writeText(r.text).then(function () {
+          setMsg("Copied. Paste it into a new issue on GitHub.");
+        }, function () { setMsg("Couldn't reach the clipboard. Click the button again.", true); });
+      }, function (e) { setMsg(String(e && e.message || e), true); });
+    });
 
     refresh();
     setInterval(refresh, 1000);

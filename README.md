@@ -110,6 +110,10 @@ Aligner Number 5.
 **Export this aligner** saves the end of the slider you are on. **Export every aligner** saves
 both, in a `current` folder and a `simulated_outcome` folder.
 
+**A viewer it can't read yet?** The panel says "Found a scan it can't read yet". Click
+**Copy file list** and paste it into a new issue here. The list holds file names and sizes
+only, no scan data.
+
 ### What you get
 
 Each export is a `.zip`. Each aligner looks like this (true scale, millimeters):

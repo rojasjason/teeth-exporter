@@ -15,7 +15,7 @@ chrome.runtime.onMessage.addListener(function (m, s, r) {
 chrome.runtime.onMessage.addListener(function (m, s, r) {
   if (m && m.type === "test-open-popup") { chrome.tabs.create({ url: chrome.runtime.getURL("src/popup.html") }, function () { r({ ok: true }); }); return true; }
   if (!m || (m.type !== "test-perms" && m.type !== "test-revoke")) return;
-  var o = { origins: ["*://*.aligntech.com/*", "*://*.invisalign.com/*", "*://*.clincheck.com/*"] };
+  var o = { origins: ["*://*.aligntech.com/*", "*://*.invisalign.com/*", "*://*.invisalign.cn/*", "*://*.clincheck.com/*"] };
   function report() { chrome.permissions.contains(o, function (v) { r({ has: v }); }); }
   if (m.type === "test-revoke") chrome.permissions.remove(o, report); else report();
   return true;
