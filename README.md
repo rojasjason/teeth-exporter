@@ -105,6 +105,11 @@ Download `teeth-exporter-firefox.zip`. Do not unzip it. Keep it somewhere it can
 Aligner numbers match the viewer's **Aligner Number** slider: the folder `stage_05` is
 Aligner Number 5.
 
+**Outcome Simulation links** (`share.invisalign.com`, a slider from "Current Teeth Position" to
+"Simulated Outcome") work too. No rotating needed: the gums come with the scan.
+**Export this aligner** saves the end of the slider you are on. **Export every aligner** saves
+both, in a `current` folder and a `simulated_outcome` folder.
+
 ### What you get
 
 Each export is a `.zip`. Each aligner looks like this (true scale, millimeters):

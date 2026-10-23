@@ -37,6 +37,7 @@
       hellos: 0, locked: false,                           // the token list closes after our own announcements
       glReqId: 0, glPending: null,                        // WebGL snapshot round trip
       maxStage: null, currentStep: null, stepTotal: null, stepSource: null, firstStage: 0,
+      bundleGums: false,                                  // the scan file carries its own gums (Outcome Simulation)
       busy: null, progress: null, cancelled: false        // command in flight + every-aligner progress
     };
 
@@ -156,6 +157,7 @@
         try { range = engine.stageRange(wb); } catch (e) { return; }
         state.bytes = wb; state.url = typeof d.url === "string" ? d.url : ""; state.size = wb.length; state.capturedAt = Date.now();
         state.maxStage = range.max;
+        state.bundleGums = !!range.bundleGums;
         ensureProbe();
         emit("onCapture", state);
         return;
@@ -206,14 +208,55 @@
         }, 6000);
       });
     }
+    // A scan file that carries its own gums (the share.invisalign "Outcome Simulation") needs no
+    // viewer stepping or WebGL rip: every stage comes straight from the file. Its two stages get
+    // named folders, since that viewer's slider reads "Current Teeth Position" / "Simulated Outcome".
+    function exportFromFile() {
+      var all = engine.exportAllStages(state.bytes);
+      var names = state.maxStage === 1 ? ["current", "simulated_outcome"] : null;
+      var outputs = {};
+      for (var k in all.outputs) {
+        var m = /^stage_(\d+)\//.exec(k);
+        outputs[(names && m) ? names[+m[1]] + "/" + k.slice(m[0].length) : k] = all.outputs[k];
+      }
+      var lines = [
+        "Teeth Exporter",
+        "units: millimeters, true scale", "",
+        names
+          ? "Two folders: current/ (your teeth now) and simulated_outcome/ (the simulated result)."
+          : "One folder per aligner stage (" + all.stageCount + " stages).",
+        "",
+        "Each folder, top level (the everyday files):",
+        "  full_mouth_with_gums.stl   both arches: teeth + gums",
+        "  upper_with_gums.stl        upper: teeth + gum",
+        "  lower_with_gums.stl        lower: teeth + gum",
+        "  full_mouth.glb             colored, separate meshes, opens in any 3D viewer",
+        "",
+        "Advanced/ (everything else): teeth only, gums only.",
+        "",
+        "  manifest.json              per-tooth arch / UNS number / width (mm)", "",
+        "Teeth and gums are an exact extraction of the meshes in the viewer's scan file."
+      ];
+      var zipped = engine.zipOutputs(outputs, { "manifest.json": text(JSON.stringify(all.manifest, null, 2)), "README.txt": text(lines.join("\n")) });
+      download(zipped, "teeth_exporter_" + (names ? "simulation_" : "all_aligners_") + ts() + ".zip");
+      var note = names
+        ? "Saved your current teeth and the simulated outcome: " + all.stats.teeth + " teeth and both gums, each (" + fmtSize(zipped.byteLength) + ")."
+        : "Saved " + all.stageCount + " aligners with gums (" + fmtSize(zipped.byteLength) + ").";
+      return Promise.resolve({ ok: true, count: all.stageCount, teeth: all.stats.teeth, bytes: zipped.byteLength, note: note });
+    }
+    function fmtSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB"; }
+
     // ---- commands ----
     var commands = {
       // the aligner on screen: exact teeth + the real gums ripped from WebGL
       fullMouth: function (args) {
         var stage = resolveStage(args && args.override);
+        var simName = (state.bundleGums && state.maxStage === 1) ? (stage === 0 ? "current" : "simulated_outcome") : null;
         var onScreen = state.stepSource === "viewer" && state.currentStep === stage;
         var gather;
-        if (!onScreen && state.stepSource === "viewer") {
+        if (state.bundleGums) {
+          gather = Promise.resolve({ snap: { meshes: [] }, restored: true });   // gums come from the file
+        } else if (!onScreen && state.stepSource === "viewer") {
           // another aligner than the one on screen: show it, rip its gums, put the viewer back
           gather = root.TeethRipStage({ tag: TAG, origin: ORIGIN, tokens: state.tokens, clean: cleanMeshes }, stage)
             .then(function (r) {
@@ -236,8 +279,11 @@
           var arches = gums.map(function (g) { return g.arch; });
           var lines = [
             "Teeth Exporter",
-            "Aligner Number " + alignerOf(stage) + "  |  units: millimeters, true scale", "",
-            gums.length
+            (simName === "current" ? "Current teeth position" : simName ? "Simulated outcome" : "Aligner Number " + alignerOf(stage)) +
+              "  |  units: millimeters, true scale", "",
+            gums.length && state.bundleGums
+              ? "Gums included: " + arches.join(" + ") + "   (from the scan file)"
+              : gums.length
               ? "Real gums included: " + arches.join(" + ") + "   (fit: " + gums.map(function (g) { return g.arch + " " + g.cost + "mm"; }).join(", ") + ")"
               : (snap.timedOut
                   ? "NO GUMS THIS PASS: the 3D capture did not answer in time. Export again."
@@ -259,17 +305,24 @@
             "",
             "  manifest.json                                              per-tooth arch / UNS number / width (mm)",
             "  README.txt                                                 this file", "",
-            "Teeth are an exact extraction. Gums are the viewer's own generated surface, ripped from WebGL."
+            state.bundleGums
+              ? "Teeth and gums are an exact extraction of the meshes in the viewer's scan file."
+              : "Teeth are an exact extraction. Gums are the viewer's own generated surface, ripped from WebGL."
           ];
           // same layout as each folder of the every-aligner export: everyday files on top, rest in Advanced/
           download(engine.zipOutputs(engine.layoutStage(res.outputs, ""), { "Advanced/manifest.json": text(JSON.stringify(res.manifest, null, 2)), "Advanced/README.txt": text(lines.join("\n")) }),
-            "teeth_exporter_full_mouth_" + ts() + ".zip");
+            "teeth_exporter_" + (simName || "full_mouth") + "_" + ts() + ".zip");
+          var gumWords = arches.length >= 2 ? "both gums" : arches.length ? "the " + (arches[0] === "U" ? "upper" : "lower") + " gum" : "no gums";
+          var note = !state.bundleGums ? null
+            : (simName === "current" ? "Saved your current teeth position" : simName ? "Saved the simulated outcome" : "Saved aligner " + alignerOf(stage)) +
+              ": " + res.stats.teeth + " teeth and " + gumWords + ".";
           return { ok: true, aligner: alignerOf(stage), teeth: res.stats.teeth, arches: arches, timedOut: !!snap.timedOut, restored: g.restored,
-            gumsFromScreen: !onScreen && state.stepSource !== "viewer" };
+            gumsFromScreen: !state.bundleGums && !onScreen && state.stepSource !== "viewer", note: note };
         });
       },
       // every aligner with its real gums, one folder each (all_stages.js steps the viewer)
       allStages: function () {
+        if (state.bundleGums) return exportFromFile();
         state.progress = { aligner: null, total: null };
         return root.TeethAllStages({
           tag: TAG, origin: ORIGIN, tokens: state.tokens, engine: engine, fflate: root.fflate, bytes: state.bytes, clean: cleanMeshes,

@@ -19,9 +19,11 @@ function run(opts) {
   const ranges = opts.ranges || [];
   const aria = opts.aria || [];
   const texts = opts.texts || [];
+  const handles = opts.handles || [];
   global.document = {
     documentElement: {}, addEventListener() {},
     querySelectorAll(sel) {
+      if (sel.indexOf("cc-stageslider") >= 0) return handles;
       if (sel.indexOf("range") >= 0) return ranges;
       if (sel.indexOf("slider") >= 0 || sel.indexOf("valuemax") >= 0) return aria;
       if (sel === "body *") return texts;
@@ -71,6 +73,16 @@ check("aria 22/22 without valuemin -> stage 21", r && r.stage === 21);
 // 7) F13: unknown plan stage count -> never latch a slider
 r = run({ max: () => null, ranges: [el({ min: "0", max: "10", value: "7" })] });
 check("maxStage unknown -> no detection (zoom slider not read as a step)", r === null);
+
+// 8) the older WebCC "Outcome Simulation" slider: a jQuery UI handle at left 0%..100% over stages 0..max
+r = run({ max: () => 1, handles: [el({ style: { left: "0%" } })] });
+check("WebCC handle at 0% (Current Teeth Position) -> stage 0", r && r.stage === 0 && r.source === "webcc");
+r = run({ max: () => 1, handles: [el({ style: { left: "100%" } })] });
+check("WebCC handle at 100% (Simulated Outcome) -> stage 1", r && r.stage === 1);
+r = run({ max: () => 21, handles: [el({ style: { left: "50%" } })], ranges: [el({ min: "0", max: "21", value: "3" })] });
+check("WebCC handle at 50% of 21 stages -> stage 11 (beats other controls)", r && r.stage === 11 && r.source === "webcc");
+r = run({ max: () => 1, handles: [el({ style: { left: "40px" } })] });
+check("WebCC handle without a % position is ignored", r === null);
 
 console.log("\n" + (pass ? "PASS  stage probe heuristic works" : "FAIL  stage probe heuristic"));
 process.exit(pass ? 0 : 1);

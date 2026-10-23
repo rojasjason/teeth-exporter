@@ -277,6 +277,7 @@
     function overrideValue() { var v = (input.value || "").trim(); return v === "" ? null : (parseInt(v, 10) || 1); }
 
     function describe(name, r) {
+      if (r.note) return [r.note, false];                 // the command wrote its own summary
       var back = r.restored === false ? " The viewer couldn't be moved back: set the slider to your aligner again." : "";
       if (name === "fullMouth") {
         var a = r.arches || [];

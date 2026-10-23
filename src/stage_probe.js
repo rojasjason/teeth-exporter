@@ -60,7 +60,18 @@
         var amx = num(a.getAttribute("aria-valuemax")), av = num(a.getAttribute("aria-valuenow"));
         if (amx != null && av != null) add(av, amx, amn, "aria", 45);
       }
-      // 3) "X / Y" or "X of Y" text, ideally near step/stage/aligner wording.
+      // 3) the older WebCC viewer (share.invisalign "Outcome Simulation"): a jQuery UI slider whose
+      // handle sits at left: 0%..100% across stages 0..max. Reported 1-based (total = max + 1) so it
+      // reads like the other steppers.
+      var handles = root.document.querySelectorAll(".cc-stageslider .ui-slider-handle");
+      for (var h = 0; h < handles.length; h++) {
+        var hd = handles[h]; if (!visible(hd) || maxStage == null || maxStage < 1) continue;
+        var pct = num(hd.style && hd.style.left);
+        if (pct == null || !/%\s*$/.test(hd.style.left)) continue;
+        pct = Math.max(0, Math.min(100, pct));
+        out.push({ current: 1 + Math.round(pct / 100 * maxStage), total: maxStage + 1, min: 1, source: "webcc", score: 200 });
+      }
+      // 4) "X / Y" or "X of Y" text, ideally near step/stage/aligner wording.
       // Skipped when a slider already matched the plan's stage count — this scan walks the DOM
       // and is only worth the cost as a fallback.
       if (out.some(function (c) { return c.score >= 85; })) { out.sort(function (p, q) { return q.score - p.score; }); return out; }
@@ -131,6 +142,9 @@
       try {
         root.document.addEventListener("input", tick, true);
         root.document.addEventListener("change", tick, true);
+        // a jQuery UI slider moves by pointer or arrow keys and fires neither input nor change
+        root.document.addEventListener("pointerup", tick, true);
+        root.document.addEventListener("keyup", tick, true);
       } catch (e) {}
       var n = 0;
       timer = root.setInterval(function () { tick(); if (++n > 40) { root.clearInterval(timer); timer = root.setInterval(tick, 2500); } }, 700);

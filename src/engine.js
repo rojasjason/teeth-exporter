@@ -148,12 +148,110 @@
     return { R: quatToMat3(rot), basis: tooth.basis, pos: pos };
   }
 
+  // ----------------------------------------------------------------- bundle layouts
+  // Two layouts reach us:
+  //   plan  (my.invisalign ClinCheck): teeth.json + jaws.json + Tooth-<id>.ctm, gums ripped from WebGL
+  //   scene (share.invisalign "Outcome Simulation", the older WebCC viewer): one scene.json node tree
+  //         (JawPair > Upper/Lower Jaw > Tooth_NN) + Tooth_NN.ctm, and the gums ship in the bundle as
+  //         one CTM per stage (GingivaUpper Jaw_<k>.ctm), switched by the gum node's morph keyframes.
+  // planOf() reads either into the plan shape, so seating, staging and export stay one code path.
+  // The scene chain was checked against the live viewer's own world matrices (max |d| 6e-8 m).
+  function planOf(files) {
+    if (files["teeth.json"] || !files["scene.json"]) {
+      var teethMeta = readJSON(files, "teeth.json");
+      if (!Array.isArray(teethMeta) || !teethMeta.length) throw new Error("no teeth in WCC bundle");
+      return { layout: "plan", jawPair: readJSON(files, "jaws.json")[0], teeth: teethMeta, gums: [],
+        meshName: function (t) { return "Tooth-" + t.id + ".ctm"; } };
+    }
+    return sceneAsPlan(files);
+  }
+
+  function sceneAsPlan(files) {
+    var scene = readJSON(files, "scene.json");
+    var objs = scene && Array.isArray(scene.sceneObjects) ? scene.sceneObjects : null;
+    if (!objs) throw new Error("no scene objects in WCC bundle");
+    var byName = {};
+    objs.forEach(function (o) { if (o && typeof o.name === "string") byName[o.name] = o; });
+    var JP = byName.JawPair, UJ = byName["Upper Jaw"], LJ = byName["Lower Jaw"];
+    if (!JP || !UJ || !LJ) throw new Error("scene has no jaw pair");
+    var nums = {};                                         // node name -> UNS number
+    try {
+      var tn = files["toothNumbers.json"] ? readJSON(files, "toothNumbers.json") : {};
+      for (var k in tn) if (tn[k] && tn[k].parent != null && tn[k].dentalTypeID != null) nums[tn[k].parent] = +tn[k].dentalTypeID;
+    } catch (e) {}
+    function vec(v, d) { return (Array.isArray(v) && v.length === 3 && v.every(isFinite)) ? v.map(Number) : d; }
+    function quat(q) { return (Array.isArray(q) && q.length === 4 && q.every(isFinite)) ? q.map(Number) : [0, 0, 0, 1]; }
+    function jaw(o) { return { basis: [0, 0, 0], motion: { "0": { rotation: quat(o.rotation), position: vec(o.position, [0, 0, 0]) } } }; }
+    // the jaw pair has no pivot of its own: zero rotationCenter makes makeSeater's chain the plain
+    // node chain  world = JawPair * Jaw * toothMotion
+    var jawPair = { upper: jaw(UJ), lower: jaw(LJ), rotationCenter: [0, 0, 0],
+      rotation: quat(JP.rotation), position: vec(JP.position, [0, 0, 0]) };
+    var archOfJaw = { "Upper Jaw": "U", "Lower Jaw": "L" };
+
+    var teeth = [];
+    objs.forEach(function (o) {
+      if (!o || typeof o.mesh !== "string" || !/^Tooth_\d+$/.test(o.name) || !archOfJaw[o.parent]) return;
+      var uns = nums[o.name] != null ? nums[o.name] : parseInt(o.name.slice(6), 10);
+      var mp = (o.motion && o.motion.position) || {}, mr = (o.motion && o.motion.rotation) || {}, motion = {};
+      Object.keys(mp).concat(Object.keys(mr)).forEach(function (s) {
+        if (!/^\d+$/.test(s) || motion[s]) return;          // skip "key" (the interpolation shape)
+        var p = mp[s] || { x: 0, y: 0, z: 0 }, r = mr[s] || { quaternion: [0, 0, 0, 1] };
+        motion[s] = { position: vec([p.x, p.y, p.z], [0, 0, 0]), rotation: quat(r.quaternion) };
+      });
+      teeth.push({ id: o.name, dentalTypeID: uns, arch: archOfJaw[o.parent], basis: vec(o.basis, [0, 0, 0]),
+        motion: motion, mesh: o.mesh });
+    });
+    if (!teeth.length) throw new Error("no teeth in WCC bundle");
+
+    var gums = [];
+    objs.forEach(function (o) {
+      if (!o || !/^GingivaMorph/.test(o.name) || !archOfJaw[o.parent]) return;
+      var targets = Array.isArray(o.morphTargets) && o.morphTargets.length ? o.morphTargets : (typeof o.mesh === "string" ? [o.mesh] : []);
+      if (!targets.length) return;
+      var keys = {}, morph = (o.motion && o.motion.morph) || {};
+      for (var s in morph) if (/^\d+$/.test(s) && morph[s] && isFinite(morph[s].morphTarget)) keys[s] = morph[s].morphTarget | 0;
+      gums.push({ arch: archOfJaw[o.parent], targets: targets, keys: keys });
+    });
+    return { layout: "scene", jawPair: jawPair, teeth: teeth, gums: gums,
+      meshName: function (t) { return t.mesh; } };
+  }
+
+  // the gum shape for one stage: the morph target keyed at/below the stage (the viewer shows
+  // target k from keyframe k on; between two keyframes it blends, so blend when the shapes match)
+  function gumAtStage(files, g, stage) {
+    var ks = Object.keys(g.keys).map(Number).sort(function (a, b) { return a - b; });
+    function mesh(i) { var n = g.targets[Math.max(0, Math.min(g.targets.length - 1, i))]; return files[n] ? decodeCTM(files[n]) : null; }
+    if (!ks.length) return mesh(0);
+    var lo = ks[0], hi = ks[ks.length - 1];
+    if (stage <= lo) return mesh(g.keys[lo]);
+    if (stage >= hi) return mesh(g.keys[hi]);
+    for (var i = 0; i < ks.length; i++) { if (ks[i] <= stage) lo = ks[i]; if (ks[i] >= stage) { hi = ks[i]; break; } }
+    var a = mesh(g.keys[lo]);
+    if (lo === hi || !a) return a;
+    var b = mesh(g.keys[hi]);
+    if (!b || b.vertices.length !== a.vertices.length) return a;
+    var t = (stage - lo) / (hi - lo), V = new Float32Array(a.vertices.length);
+    for (var j = 0; j < V.length; j++) V[j] = a.vertices[j] + t * (b.vertices[j] - a.vertices[j]);
+    return { vertices: V, faces: a.faces };
+  }
+
+  // gums shipped inside a scene bundle, seated with the teeth's chain at the chosen stage
+  function bundleGums(files, plan, seated) {
+    var out = [];
+    plan.gums.forEach(function (g) {
+      if (!seated.teeth.some(function (t) { return t.arch === g.arch; })) return;
+      var m = gumAtStage(files, g, seated.stage);
+      if (!m) return;
+      out.push({ arch: g.arch, verts: seatArray(seated.seater, m.vertices, g.arch), faces: m.faces, cost: 0 });
+    });
+    return out;
+  }
+
   // total aligner-stage range in the bundle (used to identify the viewer's step control)
   function stageRange(zipBytes) {
     var files = unzip(zipBytes);
-    var teethMeta = readJSON(files, "teeth.json");
-    if (!Array.isArray(teethMeta) || !teethMeta.length) throw new Error("no teeth in WCC bundle");
-    readJSON(files, "jaws.json");                          // a real plan always has its jaw transforms
+    var plan = planOf(files);
+    var teethMeta = plan.teeth;
     var maxAll = 0, maxU = 0, maxL = 0;
     for (var i = 0; i < teethMeta.length; i++) {
       var t = teethMeta[i], arch = archOf(t), mx = 0;
@@ -162,10 +260,11 @@
       if (arch === "U" && mx > maxU) maxU = mx;
       if (arch === "L" && mx > maxL) maxL = mx;
     }
-    return { max: maxAll, upper: maxU, lower: maxL };
+    return { max: maxAll, upper: maxU, lower: maxL, layout: plan.layout, bundleGums: plan.gums.length > 0 };
   }
 
   function archOf(tooth) {
+    if (tooth.arch === "U" || tooth.arch === "L") return tooth.arch;   // scene layout: from the jaw node
     // Universal Numbering System: 1-16 upper, 17-32 lower
     var uns = tooth.dentalTypeID != null ? tooth.dentalTypeID : tooth.number;
     return uns <= 16 ? "U" : "L";
@@ -203,16 +302,16 @@
   // ----------------------------------------------------------------- seated tooth set
   // Returns { teeth: [ {id, uns, arch, seq, verts:Float32Array(mm), faces:Uint32Array, widthMM} ],
   //           seater, stage }
-  function buildSeatedTeeth(files, stage) {
+  function buildSeatedTeeth(files, stage, plan) {
     stage = stage || 0;
-    var jawPair = readJSON(files, "jaws.json")[0];
-    var teethMeta = readJSON(files, "teeth.json");
-    var seater = makeSeater(jawPair);
+    plan = plan || planOf(files);
+    var teethMeta = plan.teeth;
+    var seater = makeSeater(plan.jawPair);
 
     var teeth = [];
     for (var i = 0; i < teethMeta.length; i++) {
       var t = teethMeta[i];
-      var ctmName = "Tooth-" + t.id + ".ctm";
+      var ctmName = plan.meshName(t);
       if (!files[ctmName]) continue;               // pontic / missing tooth: no mesh
       var arch = archOf(t);
       var dec = decodeCTM(files[ctmName]);
@@ -527,7 +626,8 @@
     opts = opts || {};
     var stage = opts.stage || 0;
     var files = unzip(zipBytes);
-    var seated = buildSeatedTeeth(files, stage);
+    var plan = planOf(files);
+    var seated = buildSeatedTeeth(files, stage, plan);
     var teeth = seated.teeth;
     if (!teeth.length) throw new Error("no tooth meshes found in bundle");
 
@@ -539,7 +639,12 @@
 
     // optional: register the real gums ripped from WebGL (opts.glMeshes) onto the exact teeth
     var gumReg = null, gumByArch = {};
-    if (opts.glMeshes && opts.glMeshes.length) {
+    if (plan.gums.length) {
+      // the scene layout ships its gums: exact, no rip or fit needed
+      var bg = bundleGums(files, plan, seated);
+      gumReg = { gums: bg, matched: 0, source: "bundle", info: bg.length + " gum(s) from the scan file" };
+      bg.forEach(function (gm) { gumByArch[gm.arch] = gm; });
+    } else if (opts.glMeshes && opts.glMeshes.length) {
       gumReg = registerGums(seated, opts.glMeshes);
       gumReg.gums.forEach(function (gm) { gumByArch[gm.arch] = gm; });
     }

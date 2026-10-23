@@ -7,8 +7,10 @@ Vendored in `lib/`, unmodified except small dual-environment shims (noted inline
 - Decodes the OpenCTM mesh format (RAW / MG1 / MG2 with LZMA).
 - Local change: `lib/ctm.js` `require('./lzma')` made conditional so it also runs as a
   browser classic script via `globalThis.LZMA`; both files append a `globalThis` export.
-  A stray no-op token was removed. No decoding logic was altered (verified bit-exact against
-  the reference `python-openctm` decoder).
+  A stray no-op token was removed. One decoding fix: `CTM.restoreVertices` reads the MG2
+  vertex deltas as signed (`Int32Array`, as the OpenCTM spec and the ClinCheck viewer's own copy
+  do); the upstream unsigned view sent any negative delta ~8.6 km off. Tooth meshes never carry
+  negative deltas, so they still decode bit-exact against the reference `python-openctm` decoder.
 
 ## fflate, `lib/fflate.umd.js`
 - © Arjun Barrett (101arrowz). License: MIT. https://github.com/101arrowz/fflate
